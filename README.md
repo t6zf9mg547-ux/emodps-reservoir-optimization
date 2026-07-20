@@ -24,7 +24,7 @@ EMODPS_Reservoir_Optimization/
 │   ├── objectives.py     # wraps the simulator into MOEA objectives + constraint
 │   ├── optimize.py       # pymoo NSGA-II driver
 │   ├── diagnostics.py    # per-solution failure counts/stats beyond the objectives
-│   └── plot_results.py   # Pareto front + per-solution simulation trace figures
+│   └── plot_results.py   # Pareto front, rule curve, level heat map, water balance, climatology, simulation trace figures
 ├── Output/          # Pareto front results per case, e.g. Output/Mandrare/ (not tracked in git)
 ├── Plot/            # generated figures per case, e.g. Plot/Mandrare/ (not tracked in git)
 ├── pyproject.toml   # project metadata + dependencies (uv-managed)
@@ -117,23 +117,41 @@ Generate figures from a saved optimization run:
 ```bash
 uv run python plot_results.py --data-dir /path/to/your/Data
 ```
-Always saves the Pareto front matrix (3 pairwise scatter plots, colored
+Always saves the **Pareto front matrix** (3 pairwise scatter plots, colored
 by the third objective, with a secondary top axis showing the
-approximate corresponding hydro design discharge) and the hypervolume
-convergence curve. By default (no extra flags needed) it ALSO picks a
-specific solution to detail -- the one with the HIGHEST energy among
-those meeting at least `DEFAULT_MIN_RELIABILITY` (90%) irrigation
-reliability (see the constant near the top of `plot_results.py`) -- and
-generates the operating rule curve (PNG + CSV), a monthly climatology
-figure, and an 8-10 year windowed simulation trace for it. Three ways to
-change the selection:
-- `--min-reliability 0.8` -- same auto-selection logic, different
-  reliability floor
-- `--solution-index N` -- a specific row of `pareto_X.csv` by hand
-- `--front-only` -- skip solution selection entirely, only the front +
-  hypervolume plots
+approximate corresponding hydro design discharge) and the **hypervolume
+convergence curve**.
 
-`--years` and `--start-offset-years` control the trace window.
+By default (no extra flags needed) it ALSO picks a specific solution to
+detail -- the one with the HIGHEST energy among those meeting at least
+`DEFAULT_MIN_RELIABILITY` (90%) irrigation reliability (see the constant
+near the top of `plot_results.py`) -- and generates:
+- **operating rule curve** (PNG zone diagram + CSV export)
+- **reservoir level heat map** (year x month grid, whole record including warm-up)
+- **average monthly water balance** (stacked bar: hydropower/irrigation/
+  environmental flow/spillage/evaporation, against a net inflow line)
+- **monthly climatology** (level, releases, irrigation demand vs. delivered, energy)
+- **windowed raw simulation trace** (level vs. MOL/FSL/flood_control_level,
+  all release streams, inflow, irrigation shortfall)
+
+Three ways to change which solution gets detailed:
+```bash
+uv run python plot_results.py --data-dir /path/to/your/Data --min-reliability 0.8   # same auto-selection, different reliability floor
+uv run python plot_results.py --data-dir /path/to/your/Data --solution-index 42     # a specific row of pareto_X.csv by hand
+uv run python plot_results.py --data-dir /path/to/your/Data --front-only            # skip solution selection entirely, only the front + hypervolume plots
+```
+
+Controlling the raw simulation trace window:
+```bash
+uv run python plot_results.py --data-dir /path/to/your/Data --years full                      # whole evaluated record instead of a 10-year window (figure width scales automatically to stay legible)
+uv run python plot_results.py --data-dir /path/to/your/Data --years 15 --start-offset-years 20  # a specific 15-year window, starting 20 years into the evaluated period
+```
+The x-axis always shows yearly tick marks, with labels spaced to stay
+readable (every year for short windows, every 5-10 years for longer ones
+including `--years full`).
+
+Flags combine freely -- e.g. `--min-reliability 0.9 --years full` details
+the 90%-reliability candidate across the entire record in one command.
 
 ### VS Code: use "Run and Debug", not the plain Run button
 

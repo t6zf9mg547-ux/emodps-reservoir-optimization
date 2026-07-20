@@ -36,6 +36,7 @@ matplotlib.use("Agg")  # non-interactive backend: this script only ever saves
                         # interactive GUI backend, which can pop up blank
                         # windows or hang instead of just writing the file.
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 
@@ -366,7 +367,10 @@ def plot_water_balance(data, categories, x, out_path: str | Path, solution_index
     ax.set_ylabel("Volume [Mm3]")
     ax.set_xlabel("Month")
     title_suffix = f" -- solution {solution_index}" if solution_index is not None else ""
-    ax.set_title(f"Average Monthly Water Balance{title_suffix}")
+    n_years = mask.sum() / 12.0
+    ax.set_title(f"Average Monthly Water Balance{title_suffix}\n"
+                 f"(mean of each calendar month across {n_years:.0f} evaluated years, "
+                 f"warm-up excluded)", fontsize=12)
     ax.legend(loc="upper right", fontsize=9, ncol=2)
     ax.grid(alpha=0.3, axis="y")
 
@@ -399,7 +403,10 @@ def plot_solution_climatology(data, categories, x, out_path: str | Path, solutio
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
     title_suffix = f" -- solution {solution_index}" if solution_index is not None else ""
-    fig.suptitle(f"Monthly climatology{title_suffix}")
+    n_years = mask.sum() / 12.0
+    fig.suptitle(f"Monthly climatology{title_suffix}\n"
+                 f"(mean of each calendar month across {n_years:.0f} evaluated years, "
+                 f"warm-up excluded)", fontsize=12)
 
     ax = axes[0, 0]
     ax.plot(MONTH_LABELS, level_clim, color="#2b6cb0", marker="o")
@@ -440,18 +447,29 @@ def plot_solution_climatology(data, categories, x, out_path: str | Path, solutio
 # 7. Windowed raw time series for one solution
 # ---------------------------------------------------------------------------
 
-def plot_solution_timeseries(data, categories, x, out_path: str | Path, n_years: int = 10,
+def plot_solution_timeseries(data, categories, x, out_path: str | Path, n_years: int | str = 10,
                               start_offset_years: int = 0, solution_index: int | None = None):
+    """
+    n_years="full" (or any n_years large enough to exceed the actual
+    evaluated record) plots the WHOLE evaluated period in one chart.
+    Figure width scales with the actual number of years plotted (clipped
+    to a sane range) so a full 70-year record stays legible instead of
+    being crammed into a fixed-width image sized for a 10-year window.
+    """
     result = _simulate_solution(data, categories, x)
     mask = _warmup_mask(data)
     start = np.where(mask)[0][0] + start_offset_years * 12
-    end = min(start + n_years * 12, data.n_steps)
+
+    n_years_requested = data.n_steps if n_years == "full" else int(n_years)
+    end = min(start + n_years_requested * 12, data.n_steps)
+    actual_years = (end - start) / 12.0
 
     dates = pd.to_datetime({"year": data.years[start:end], "month": data.months[start:end], "day": 1})
 
-    fig, axes = plt.subplots(3, 1, figsize=(13, 9), sharex=True)
+    fig_width = float(np.clip(actual_years * 0.45, 13, 55))
+    fig, axes = plt.subplots(3, 1, figsize=(fig_width, 9), sharex=True)
     title_suffix = f" -- solution {solution_index}" if solution_index is not None else ""
-    fig.suptitle(f"Simulation trace, {n_years} years starting "
+    fig.suptitle(f"Simulation trace, {actual_years:.1f} years starting "
                  f"{data.years[start]}-{data.months[start]:02d}{title_suffix}")
 
     ax = axes[0]
@@ -478,6 +496,22 @@ def plot_solution_timeseries(data, categories, x, out_path: str | Path, n_years:
     ax.legend(fontsize=8, loc="upper right")
     ax.grid(alpha=0.3)
     ax.set_xlabel("Date")
+
+    # Yearly tick marks always; labeled interval scales with the plotted span
+    # so a short --years window still gets readable labels (e.g. every year)
+    # while a long/full window gets labels every 10 years as requested,
+    # rather than one fixed spacing that's wrong at either extreme.
+    if actual_years <= 12:
+        label_interval = 1
+    elif actual_years <= 30:
+        label_interval = 5
+    else:
+        label_interval = 10
+    for ax in axes:
+        ax.xaxis.set_major_locator(mdates.YearLocator(label_interval))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
+        ax.xaxis.set_minor_locator(mdates.YearLocator(1))
+        ax.grid(which="minor", axis="x", alpha=0.1)
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -559,7 +593,10 @@ if __name__ == "__main__":
         help="Skip solution selection/detail plots entirely -- only make the Pareto front "
              "matrix + hypervolume convergence plots, with no highlighted solution.",
     )
-    parser.add_argument("--years", type=int, default=10, help="Years shown in the windowed time series plot (default: 10).")
+    parser.add_argument("--years", type=str, default="10",
+                         help="Years shown in the windowed time series plot (default: 10). "
+                              "Pass 'full' to plot the entire evaluated period instead of a window "
+                              "(figure width scales automatically to stay legible).")
     parser.add_argument("--start-offset-years", type=int, default=0,
                          help="Years into the (post-warmup) record where the time series window starts (default: 0).")
     args = parser.parse_args()
@@ -626,6 +663,7 @@ if __name__ == "__main__":
         print(f"Saved {clim_path}")
 
         ts_path = plot_dir / f"solution_{solution_index}_timeseries.png"
-        plot_solution_timeseries(data, categories, x, ts_path, n_years=args.years,
+        years_arg = "full" if args.years.lower() == "full" else int(args.years)
+        plot_solution_timeseries(data, categories, x, ts_path, n_years=years_arg,
                                   start_offset_years=args.start_offset_years, solution_index=solution_index)
         print(f"Saved {ts_path}")

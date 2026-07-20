@@ -42,6 +42,9 @@ class DiagnosticsReport:
     hydro_mean_energy_when_online_MWh: float
     hydro_total_energy_GWh: float
     hydro_total_volume_Mm3: float              # total water volume that passed through the turbine, evaluated period
+    hydro_design_discharge_m3s: float           # the installed capacity itself, for reference alongside the utilization metrics
+    hydro_capacity_utilization: float           # mean release (ALL evaluated months, including 0) / design discharge -- 0-1
+    hydro_months_near_full_capacity: int        # months where release >= 90% of design discharge
     irrig_total_delivered_volume_Mm3: float    # total water volume actually delivered to irrigation, evaluated period
 
     # Spillway / flood management (informational -- NOT the dam-safety constraint)
@@ -71,6 +74,10 @@ class DiagnosticsReport:
         print(f"  Months offline: {self.hydro_months_offline}")
         print(f"  Total energy: {self.hydro_total_energy_GWh:.1f} GWh")
         print(f"  Total water turbined: {self.hydro_total_volume_Mm3:.1f} Mm3")
+        print(f"  Installed (design) discharge: {self.hydro_design_discharge_m3s:.2f} m3/s")
+        print(f"  Capacity utilization: {self.hydro_capacity_utilization:.1%} "
+              f"(mean release / design discharge, across ALL evaluated months)")
+        print(f"  Months near full capacity (>=90%): {self.hydro_months_near_full_capacity}/{n}")
         print(f"  Mean energy per online month: {self.hydro_mean_energy_when_online_MWh:.1f} MWh")
         print()
         print(f"Irrigation total delivered volume: {self.irrig_total_delivered_volume_Mm3:.1f} Mm3")
@@ -143,6 +150,9 @@ def diagnose(data, categories: np.ndarray, x: np.ndarray) -> DiagnosticsReport:
         hydro_mean_energy_when_online_MWh=float(energy[online].mean()) if online.any() else 0.0,
         hydro_total_energy_GWh=float(energy.sum() / 1000.0),
         hydro_total_volume_Mm3=float(hydro_volume_Mm3),
+        hydro_design_discharge_m3s=float(design_discharge_hydro),
+        hydro_capacity_utilization=float(hydro.mean() / design_discharge_hydro) if design_discharge_hydro > 0 else 0.0,
+        hydro_months_near_full_capacity=int((hydro >= 0.9 * design_discharge_hydro).sum()),
         irrig_total_delivered_volume_Mm3=float(irrig_delivered_volume_Mm3),
         spill_months_active=int(spill_active.sum()),
         spill_max_m3s=float(spill.max()) if n_eval else 0.0,
