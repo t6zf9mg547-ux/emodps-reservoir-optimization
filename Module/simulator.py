@@ -263,7 +263,7 @@ def simulate(
             bypass_needed_vol = env_actual_vol
 
         bypass_actual_vol = min(bypass_needed_vol, data.m3s_to_Mm3(bypass_cap_m3s, d_days))
-        env_delivered_vol = env_via_turbine_vol + bypass_actual_vol
+        env_delivered_vol = env_via_turbine_vol + bypass_actual_vol  # REPORTING metric only -- see note below
         hydro_release_vol = data.m3s_to_Mm3(hydro_release_m3s, d_days)
 
         # --- irrigation: target = mult * demand, capped by design (intake) capacity,
@@ -275,7 +275,17 @@ def simulate(
         )
         irrig_release_vol = data.m3s_to_Mm3(irrig_target_m3s, d_days)
 
-        baseline_vol = env_delivered_vol + hydro_release_vol + irrig_release_vol
+        # Mass-balance release: hydro_release_vol ALREADY includes any turbined
+        # environmental-flow water (a floor under hydro release, not additive --
+        # see above), so it must NOT be added again here. Only hydro_release_vol
+        # (turbine, whatever its composition) + bypass_actual_vol (a physically
+        # separate outlet) + irrig_release_vol are physically distinct
+        # withdrawals from storage. env_delivered_vol is kept purely as a
+        # REPORTING metric (env_release_m3s below) -- summing it into the mass
+        # balance here would double-count the turbined portion of the
+        # environmental flow, over-depleting storage every month the turbine
+        # runs with environmental_flow_turbined=True.
+        baseline_vol = hydro_release_vol + bypass_actual_vol + irrig_release_vol
         # cap at BOTH water availability AND the physical capacity of the combined
         # power/irrigation outlets (max_release_capacity_m3s -- distinct from the
         # spillway, which is handled separately below)
@@ -284,6 +294,7 @@ def simulate(
             scale = (max_baseline_vol / baseline_vol) if baseline_vol > 0 else 0.0
             env_delivered_vol *= scale
             hydro_release_vol *= scale
+            bypass_actual_vol *= scale
             irrig_release_vol *= scale
             baseline_vol = max_baseline_vol
 

@@ -341,7 +341,12 @@ def plot_water_balance(data, categories, x, out_path: str | Path, solution_index
 
     hydro_vol = clim_vol_from_m3s(result.hydro_release_m3s)
     irrig_vol = clim_vol_from_m3s(result.irrig_release_m3s)
-    env_vol = clim_vol_from_m3s(result.env_release_m3s)
+    # Use the BYPASS portion only, not total env_release_m3s -- when environmental
+    # flow is turbined, it's already inside hydro_release_m3s (a floor, not
+    # additive); stacking the full total again here would double-count that
+    # water in the chart. This also matches how the Excel legacy model presents
+    # it ("Hydropower incl. ecological flow", not shown as a separate bar).
+    env_vol = clim_vol_from_m3s(result.env_bypass_release_m3s)
     spill_vol = clim_vol_from_m3s(result.spillway_release_m3s)
     evap_vol = clim_vol_direct(result.evaporation_Mm3)
     inflow_vol = clim_vol_from_m3s(data.inflow_m3s)
@@ -352,7 +357,7 @@ def plot_water_balance(data, categories, x, out_path: str | Path, solution_index
     components = [
         ("Hydropower", hydro_vol, "#2196F3"),
         ("Irrigation", irrig_vol, "#4CAF50"),
-        ("Environmental flow", env_vol, "#9C27B0"),
+        ("Environmental flow (bypass only)", env_vol, "#9C27B0"),
         ("Spillage", spill_vol, "#E53935"),
         ("Evaporation", evap_vol, "#FF9800"),
     ]
