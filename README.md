@@ -197,6 +197,7 @@ uv remove <package>
 | `inflows_monthly.csv` | template — REPLACE | Monthly inflow record, **30+ years** (year, month, m3/s) |
 | `evaporation_monthly.csv` | template — REPLACE | Monthly evaporation (mm) + seepage (Mm3), climatology |
 | `irrigation_demand_monthly.csv` | template — REPLACE | Monthly irrigation demand (m3/s) + priority weight |
+| `water_supply_demand_monthly.csv` | template — REPLACE | Monthly water supply (domestic/municipal) demand (m3/s), modeled the same way as irrigation |
 | `hydropower_availability_monthly.csv` | template — REPLACE | Monthly derating factor for scheduled turbine maintenance |
 | `environmental_flow_monthly.csv` | template — REPLACE | Mandatory monthly environmental flow (m3/s) |
 | `spillway_rating_curve.csv` | template — REPLACE | Elevation-discharge spillway rating curve (FSL to flood_control_level) |
@@ -228,6 +229,18 @@ the loader.
   capped at `min(mult * demand, capacity)` and reliability is capped at
   meeting a fixed demand -- there's no open-ended benefit to searching
   over it the way there is for hydropower capacity.
+- **Water supply**: modeled the same way as irrigation -- a predetermined
+  monthly demand (`water_supply_demand_monthly.csv`), a fixed design
+  capacity (`design_discharge_water_supply_m3s`, not a decision variable,
+  same reasoning as irrigation), and its own physical intake elevation
+  (`min_operating_level_water_supply`). Shares irrigation's zone
+  multiplier -- both are protected/curtailed together, matching the
+  legacy Excel model this project was compared against (irrigation and
+  water supply failed in the exact same months there). Not currently a
+  4th Pareto objective -- tracked as its own reliability/shortfall metric
+  in `diagnostics.py`, but its water use already affects all 3 existing
+  objectives (energy, irrigation reliability, spillage) through the mass
+  balance, correctly.
 - **Service-specific minimum operating levels**: `min_operating_level`
   (MOL) is the absolute reservoir floor the zone policy operates within.
   `min_operating_level_hydro` and `min_operating_level_irrig` are each

@@ -53,6 +53,7 @@ class ReservoirData:
     seepage_Mm3: np.ndarray         # (12,) Mm3/month
     irrig_demand_m3s: np.ndarray    # (12,) m3/s
     irrig_priority: np.ndarray      # (12,) dimensionless weight
+    water_supply_demand_m3s: np.ndarray  # (12,) m3/s -- modeled the same way as irrigation, see simulator.py
     hydro_availability: np.ndarray  # (12,) fraction [0,1], derates design discharge for maintenance
     env_flow_m3s: np.ndarray        # (12,) mandatory monthly environmental flow
 
@@ -133,6 +134,7 @@ def load_reservoir_data(data_dir: str | Path) -> ReservoirData:
     inflow = _read_csv(data_dir / "inflows_monthly.csv")
     evap = _read_csv(data_dir / "evaporation_monthly.csv")
     irrig = _read_csv(data_dir / "irrigation_demand_monthly.csv")
+    water_supply = _read_csv(data_dir / "water_supply_demand_monthly.csv")
     hydro_avail = _read_csv(data_dir / "hydropower_availability_monthly.csv")
     env_flow = _read_csv(data_dir / "environmental_flow_monthly.csv")
     spillway = _read_csv(data_dir / "spillway_rating_curve.csv")
@@ -163,6 +165,7 @@ def load_reservoir_data(data_dir: str | Path) -> ReservoirData:
         seepage_Mm3=evap.sort_values("month")["seepage_Mm3"].to_numpy(float),
         irrig_demand_m3s=irrig.sort_values("month")["demand_m3s"].to_numpy(float),
         irrig_priority=irrig.sort_values("month")["priority_weight"].to_numpy(float),
+        water_supply_demand_m3s=water_supply.sort_values("month")["demand_m3s"].to_numpy(float),
         hydro_availability=hydro_avail.sort_values("month")["availability_fraction"].to_numpy(float),
         env_flow_m3s=env_flow.sort_values("month")["flow_m3s"].to_numpy(float),
         spillway_elevation=spillway["elevation_m"].to_numpy(float),
@@ -188,6 +191,7 @@ def _validate(d: ReservoirData) -> None:
         ("evaporation_monthly.csv", d.evaporation_mm),
         ("evaporation_monthly.csv (seepage)", d.seepage_Mm3),
         ("irrigation_demand_monthly.csv", d.irrig_demand_m3s),
+        ("water_supply_demand_monthly.csv", d.water_supply_demand_m3s),
         ("hydropower_availability_monthly.csv", d.hydro_availability),
         ("environmental_flow_monthly.csv", d.env_flow_m3s),
     ]:
@@ -248,11 +252,11 @@ def _validate(d: ReservoirData) -> None:
     required_scalars = [
         "min_operating_level", "max_operating_level", "flood_control_level",
         "initial_level", "max_release_capacity_m3s",
-        "min_operating_level_hydro", "min_operating_level_irrig",
+        "min_operating_level_hydro", "min_operating_level_irrig", "min_operating_level_water_supply",
         "environmental_flow_turbined", "bypass_outlet_capacity_m3s",
         "turbine_efficiency", "min_hydropower_head", "alpha_headloss_coeff",
         "design_discharge_hydro_min", "design_discharge_hydro_max",
-        "design_discharge_irrig_m3s",
+        "design_discharge_irrig_m3s", "design_discharge_water_supply_m3s",
     ]
     missing = [p for p in required_scalars if p not in d.scalars]
     if missing:
@@ -281,7 +285,7 @@ def _validate(d: ReservoirData) -> None:
         if not (lo <= d.scalars["max_operating_level"] <= hi):
             errors.append("config_scalars.csv: max_operating_level is outside the EVAC elevation range.")
 
-        for name in ("min_operating_level_hydro", "min_operating_level_irrig"):
+        for name in ("min_operating_level_hydro", "min_operating_level_irrig", "min_operating_level_water_supply"):
             if name in d.scalars:
                 if not (d.scalars["min_operating_level"] <= d.scalars[name] <= d.scalars["max_operating_level"]):
                     errors.append(
@@ -299,6 +303,17 @@ def _validate(d: ReservoirData) -> None:
                 "silently undersize the canal below what's needed to ever fully meet demand. If this is "
                 "intentional, this check needs a deliberate override; if not, raise the capacity to at "
                 "least the peak demand."
+            )
+
+    if "design_discharge_water_supply_m3s" in d.scalars and d.water_supply_demand_m3s.size > 0:
+        peak_ws_demand = d.water_supply_demand_m3s.max()
+        if d.scalars["design_discharge_water_supply_m3s"] < peak_ws_demand:
+            errors.append(
+                f"config_scalars.csv: design_discharge_water_supply_m3s "
+                f"({d.scalars['design_discharge_water_supply_m3s']}) is below peak monthly demand "
+                f"({peak_ws_demand}) in water_supply_demand_monthly.csv -- this would silently undersize "
+                "the intake below what's needed to ever fully meet demand. If this is intentional, this "
+                "check needs a deliberate override; if not, raise the capacity to at least the peak demand."
             )
 
     if errors:

@@ -40,7 +40,7 @@ import matplotlib.dates as mdates
 import numpy as np
 import pandas as pd
 
-from objectives import _warmup_mask
+from objectives import IRRIGATION_SHORTFALL_TOLERANCE_M3S, _warmup_mask
 from policy import CATEGORY_NAMES, decode_policy
 from simulator import simulate
 
@@ -84,7 +84,19 @@ def plot_hypervolume(hv: pd.DataFrame, out_path: str | Path):
 # 2. Pareto front -- pairwise 2D scatter matrix
 # ---------------------------------------------------------------------------
 
-def plot_pareto_matrix(F: pd.DataFrame, X: pd.DataFrame, out_path: str | Path, highlight_index: int | None = None):
+def plot_pareto_matrix(F: pd.DataFrame, X: pd.DataFrame, out_path: str | Path, highlight_index: int | None = None,
+                        data=None, categories: np.ndarray | None = None):
+    """
+    data/categories are optional -- if given, a 4th panel is added comparing
+    irrigation reliability directly against water supply reliability
+    (colored by energy), since water supply isn't one of the 3 objectives
+    NSGA-II actually optimizes (see objectives.py/optimize.py) and so has no
+    natural home in pareto_F.csv. Computing this requires re-simulating
+    every solution in X (ws_reliability isn't stored anywhere) -- cheap
+    with the numba-accelerated simulator, but skipped entirely if data/
+    categories aren't provided (keeps this function usable from contexts
+    that only have F/X, e.g. quick ad-hoc front inspection).
+    """
     energy = -F["neg_energy_GWh_per_year"]
     reliability = -F["neg_irrig_reliability"]
     spillage = F["spillage_Mm3_per_year"]
@@ -105,7 +117,21 @@ def plot_pareto_matrix(F: pd.DataFrame, X: pd.DataFrame, out_path: str | Path, h
         (reliability, spillage, energy, "Irrigation reliability", "Spillage (Mm3/yr)", "Energy (GWh/yr)", False),
     ]
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5.5))
+    ws_reliability = None
+    if data is not None and categories is not None:
+        mask = _warmup_mask(data)
+        n_eval = mask.sum()
+        ws_rel_list = []
+        for i in range(len(X)):
+            result = _simulate_solution(data, categories, X.iloc[i].to_numpy())
+            failing = result.ws_shortfall_m3s[mask] > IRRIGATION_SHORTFALL_TOLERANCE_M3S
+            ws_rel_list.append(1.0 - failing.sum() / n_eval)
+        ws_reliability = pd.Series(ws_rel_list, index=X.index)
+        pairs.append((reliability, ws_reliability, energy,
+                      "Irrigation reliability", "Water supply reliability", "Energy (GWh/yr)", False))
+
+    n_panels = len(pairs)
+    fig, axes = plt.subplots(1, n_panels, figsize=(16 * n_panels / 3, 5.5))
     for ax, (x, y, c, xlabel, ylabel, clabel, energy_is_x) in zip(axes, pairs):
         sc = ax.scatter(x, y, c=c, cmap="viridis", s=45, edgecolor="white", linewidth=0.4)
         if highlight_index is not None:
@@ -137,6 +163,12 @@ def plot_pareto_matrix(F: pd.DataFrame, X: pd.DataFrame, out_path: str | Path, h
         f"monthly demand in irrigation_demand_monthly.csv -- 100% means every "
         f"evaluated month fully met that demand, not some larger potential delivery."
     )
+    if ws_reliability is not None:
+        footnote += (
+            " Water supply reliability is NOT one of the 3 objectives NSGA-II "
+            "optimizes -- it's computed here just for this comparison, using the "
+            "same shared zone multiplier as irrigation (see simulator.py)."
+        )
     fig.text(0.5, 0.005, footnote, ha="center", va="bottom", fontsize=7.5, color="#555555", wrap=True)
     fig.tight_layout(rect=(0, 0.035, 1, 1))
     fig.savefig(out_path, dpi=150)
@@ -341,6 +373,7 @@ def plot_water_balance(data, categories, x, out_path: str | Path, solution_index
 
     hydro_vol = clim_vol_from_m3s(result.hydro_release_m3s)
     irrig_vol = clim_vol_from_m3s(result.irrig_release_m3s)
+    ws_vol = clim_vol_from_m3s(result.ws_release_m3s)
     # Use the BYPASS portion only, not total env_release_m3s -- when environmental
     # flow is turbined, it's already inside hydro_release_m3s (a floor, not
     # additive); stacking the full total again here would double-count that
@@ -357,6 +390,7 @@ def plot_water_balance(data, categories, x, out_path: str | Path, solution_index
     components = [
         ("Hydropower", hydro_vol, "#2196F3"),
         ("Irrigation", irrig_vol, "#4CAF50"),
+        ("Water supply", ws_vol, "#00BCD4"),
         ("Environmental flow (bypass only)", env_vol, "#9C27B0"),
         ("Spillage", spill_vol, "#E53935"),
         ("Evaporation", evap_vol, "#FF9800"),
@@ -402,11 +436,13 @@ def plot_solution_climatology(data, categories, x, out_path: str | Path, solutio
     hydro_clim = clim(result.hydro_release_m3s)
     irrig_clim = clim(result.irrig_release_m3s)
     irrig_demand_clim = data.irrig_demand_m3s  # already a 12-length climatology
+    ws_clim = clim(result.ws_release_m3s)
+    ws_demand_clim = data.water_supply_demand_m3s
     env_clim = clim(result.env_release_m3s)
     spill_clim = clim(result.spillway_release_m3s)
     energy_clim = clim(result.energy_MWh)
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    fig, axes = plt.subplots(2, 3, figsize=(16, 8))
     title_suffix = f" -- solution {solution_index}" if solution_index is not None else ""
     n_years = mask.sum() / 12.0
     fig.suptitle(f"Monthly climatology{title_suffix}\n"
@@ -428,6 +464,12 @@ def plot_solution_climatology(data, categories, x, out_path: str | Path, solutio
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
 
+    ax = axes[0, 2]
+    ax.bar(MONTH_LABELS, energy_clim / 1000.0, color="#2b6cb0")
+    ax.set_ylabel("GWh")
+    ax.set_title("Hydropower energy")
+    ax.grid(alpha=0.3, axis="y")
+
     ax = axes[1, 0]
     ax.plot(MONTH_LABELS, irrig_demand_clim, label="Demand", color="gray", linestyle="--", marker="o")
     ax.plot(MONTH_LABELS, irrig_clim, label="Delivered", color="#c05621", marker="o")
@@ -438,10 +480,15 @@ def plot_solution_climatology(data, categories, x, out_path: str | Path, solutio
     ax.grid(alpha=0.3)
 
     ax = axes[1, 1]
-    ax.bar(MONTH_LABELS, energy_clim / 1000.0, color="#2b6cb0")
-    ax.set_ylabel("GWh")
-    ax.set_title("Hydropower energy")
-    ax.grid(alpha=0.3, axis="y")
+    ax.plot(MONTH_LABELS, ws_demand_clim, label="Demand", color="gray", linestyle="--", marker="o")
+    ax.plot(MONTH_LABELS, ws_clim, label="Delivered", color="#00838F", marker="o")
+    ax.fill_between(MONTH_LABELS, ws_clim, ws_demand_clim, color="red", alpha=0.15, label="Shortfall")
+    ax.set_ylabel("m3/s")
+    ax.set_title("Water supply: demand vs. delivered")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.3)
+
+    fig.delaxes(axes[1, 2])  # unused slot
 
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -489,6 +536,7 @@ def plot_solution_timeseries(data, categories, x, out_path: str | Path, n_years:
     ax = axes[1]
     ax.plot(dates, result.hydro_release_m3s[start:end], label="Hydropower", color="#c05621")
     ax.plot(dates, result.irrig_release_m3s[start:end], label="Irrigation", color="#38a169")
+    ax.plot(dates, result.ws_release_m3s[start:end], label="Water supply", color="#00838F")
     ax.plot(dates, result.spillway_release_m3s[start:end], label="Spillway", color="#805ad5")
     ax.set_ylabel("Release (m3/s)")
     ax.legend(fontsize=8, loc="upper right")
@@ -624,6 +672,8 @@ if __name__ == "__main__":
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     F, X, hv = load_pareto(output_dir)
+    data = load_reservoir_data(data_dir)
+    categories = compute_forecast_categories(data.months, data.inflow_m3s)
 
     if args.front_only:
         solution_index = None
@@ -639,12 +689,11 @@ if __name__ == "__main__":
     plot_hypervolume(hv, plot_dir / "hypervolume_convergence.png")
     print(f"Saved {plot_dir / 'hypervolume_convergence.png'}")
 
-    plot_pareto_matrix(F, X, plot_dir / "pareto_front_matrix.png", highlight_index=solution_index)
+    plot_pareto_matrix(F, X, plot_dir / "pareto_front_matrix.png", highlight_index=solution_index,
+                       data=data, categories=categories)
     print(f"Saved {plot_dir / 'pareto_front_matrix.png'}")
 
     if solution_index is not None:
-        data = load_reservoir_data(data_dir)
-        categories = compute_forecast_categories(data.months, data.inflow_m3s)
         x = X.iloc[solution_index].to_numpy()
 
         rule_curve_path = plot_dir / f"solution_{solution_index}_rule_curve.png"

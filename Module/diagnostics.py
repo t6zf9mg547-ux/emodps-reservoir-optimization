@@ -36,6 +36,14 @@ class DiagnosticsReport:
     irrig_mean_shortfall_when_failing_m3s: float
     irrig_total_shortfall_volume_Mm3: float   # cumulative unmet demand, evaluated period
 
+    # Water supply (modeled the same way as irrigation)
+    ws_months_with_shortfall: int
+    ws_reliability: float
+    ws_max_shortfall_m3s: float
+    ws_mean_shortfall_when_failing_m3s: float
+    ws_total_shortfall_volume_Mm3: float
+    ws_total_delivered_volume_Mm3: float
+
     # Hydropower
     hydro_months_offline: int                 # hydro_release ~ 0 (maintenance, infeasible head, or Restricted zone)
     hydro_months_online: int
@@ -68,6 +76,16 @@ class DiagnosticsReport:
             print(f"  Max shortfall: {self.irrig_max_shortfall_m3s:.2f} m3/s")
             print(f"  Mean shortfall (failing months only): {self.irrig_mean_shortfall_when_failing_m3s:.2f} m3/s")
         print(f"  Total unmet demand volume: {self.irrig_total_shortfall_volume_Mm3:.1f} Mm3")
+        print()
+        print("Water Supply (modeled the same way as irrigation)")
+        print(f"  Reliability: {self.ws_reliability:.1%} "
+              f"({n - self.ws_months_with_shortfall}/{n} months fully met)")
+        print(f"  Months with shortfall: {self.ws_months_with_shortfall}")
+        if self.ws_months_with_shortfall > 0:
+            print(f"  Max shortfall: {self.ws_max_shortfall_m3s:.2f} m3/s")
+            print(f"  Mean shortfall (failing months only): {self.ws_mean_shortfall_when_failing_m3s:.2f} m3/s")
+        print(f"  Total unmet demand volume: {self.ws_total_shortfall_volume_Mm3:.1f} Mm3")
+        print(f"  Total delivered volume: {self.ws_total_delivered_volume_Mm3:.1f} Mm3")
         print()
         print("Hydropower")
         print(f"  Months online: {self.hydro_months_online}/{n}")
@@ -125,6 +143,12 @@ def diagnose(data, categories: np.ndarray, x: np.ndarray) -> DiagnosticsReport:
     failing = shortfall > IRRIGATION_SHORTFALL_TOLERANCE_M3S
     n_fail = int(failing.sum())
 
+    ws_shortfall = result.ws_shortfall_m3s[mask]
+    ws_failing = ws_shortfall > IRRIGATION_SHORTFALL_TOLERANCE_M3S
+    ws_n_fail = int(ws_failing.sum())
+    ws_delivered = result.ws_release_m3s[mask]
+    ws_delivered_volume_Mm3 = data.m3s_to_Mm3(ws_delivered, days).sum()
+
     hydro = result.hydro_release_m3s[mask]
     online = hydro > 1e-9
     energy = result.energy_MWh[mask]
@@ -145,6 +169,12 @@ def diagnose(data, categories: np.ndarray, x: np.ndarray) -> DiagnosticsReport:
         irrig_max_shortfall_m3s=float(shortfall.max()) if n_eval else 0.0,
         irrig_mean_shortfall_when_failing_m3s=float(shortfall[failing].mean()) if n_fail else 0.0,
         irrig_total_shortfall_volume_Mm3=float(data.m3s_to_Mm3(shortfall, days).sum()),
+        ws_months_with_shortfall=ws_n_fail,
+        ws_reliability=float(1.0 - ws_n_fail / n_eval) if n_eval else 0.0,
+        ws_max_shortfall_m3s=float(ws_shortfall.max()) if n_eval else 0.0,
+        ws_mean_shortfall_when_failing_m3s=float(ws_shortfall[ws_failing].mean()) if ws_n_fail else 0.0,
+        ws_total_shortfall_volume_Mm3=float(data.m3s_to_Mm3(ws_shortfall, days).sum()),
+        ws_total_delivered_volume_Mm3=float(ws_delivered_volume_Mm3),
         hydro_months_offline=int((~online).sum()),
         hydro_months_online=int(online.sum()),
         hydro_mean_energy_when_online_MWh=float(energy[online].mean()) if online.any() else 0.0,

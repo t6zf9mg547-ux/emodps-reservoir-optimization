@@ -135,10 +135,192 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from numba import njit
 
 from policy import PolicyParams, delivery_multipliers
 
 KW_PER_M3S_M = 9.81  # rho * g / 1000, standard hydropower power formula: P[kW] = 9.81 * Q * H * eta
+
+
+@njit(cache=True)
+def _simulate_core(
+    months, cats, inflow_m3s, days,
+    evac_elevation, evac_volume, evac_area,
+    spillway_elevation, spillway_discharge_m3s,
+    tailwater_discharge_m3s, tailwater_elevation_m,
+    evaporation_mm, seepage_Mm3, irrig_demand_m3s, water_supply_demand_m3s,
+    hydro_availability, env_flow_m3s,
+    policy_b2, policy_b3, hydro_buffer_floor, irrig_buffer_floor,
+    fsl_vol, safety_vol, mol_hydro, mol_irrig, mol_water_supply, min_head, turbine_eff, alpha,
+    env_turbined, bypass_cap_m3s, max_release_cap_m3s,
+    design_discharge_hydro, design_discharge_irrig, design_discharge_water_supply, initial_storage,
+):
+    """
+    Numba-jitted core of the monthly loop. Line-for-line equivalent of the
+    pure-Python version below (see simulate() and the module docstring for
+    the full explanation of every rule implemented here) -- this function
+    exists ONLY for speed, not to change any behavior. Takes plain arrays
+    and scalars (no ReservoirData/PolicyParams objects, since numba can't
+    jit arbitrary Python class methods) -- delivery_multipliers' logic is
+    inlined directly using policy_b2/policy_b3 + the two floor fractions,
+    and every data.<method>() lookup becomes a direct np.interp() call
+    against the corresponding raw array.
+
+    Water supply is modeled the same way as irrigation (predetermined
+    demand, own physical intake MOL, own fixed design capacity) but shares
+    irrig_mult -- both are protected/curtailed together, matching the
+    legacy Excel model this project was compared against.
+    """
+    T = months.shape[0]
+    storage = np.empty(T + 1)
+    storage[0] = initial_storage
+    level = np.empty(T)
+    hydro_release = np.zeros(T)
+    irrig_release = np.zeros(T)
+    ws_release = np.zeros(T)
+    env_release = np.zeros(T)
+    env_bypass_release = np.zeros(T)
+    spillway_release = np.zeros(T)
+    total_release = np.zeros(T)
+    energy = np.zeros(T)
+    evaporation = np.zeros(T)
+    irrig_shortfall = np.zeros(T)
+    ws_shortfall = np.zeros(T)
+    dam_safety_violation = np.zeros(T)
+
+    for t in range(T):
+        m = months[t] - 1
+        cat = cats[t]
+        d_days = days[t]
+
+        inflow_vol = inflow_m3s[t] * d_days * 86400.0 / 1.0e6
+
+        area = np.interp(storage[t], evac_volume, evac_area)
+        evap_vol = evaporation_mm[m] * 1e-3 * area
+        seepage_vol = seepage_Mm3[m]
+
+        s_avail = max(storage[t] + inflow_vol - evap_vol - seepage_vol, 0.0)
+        evaporation[t] = evap_vol
+
+        # --- zone-based delivery targets (delivery_multipliers, inlined) ---
+        b2v = policy_b2[cat, m]
+        b3v = policy_b3[cat, m]
+        if s_avail >= b2v:
+            hydro_mult = 1.0
+            irrig_mult = 1.0
+        elif s_avail >= b3v:
+            frac = (s_avail - b3v) / max(b2v - b3v, 1e-9)
+            hydro_mult = hydro_buffer_floor + frac * (1.0 - hydro_buffer_floor)
+            irrig_mult = irrig_buffer_floor + frac * (1.0 - irrig_buffer_floor)
+        else:
+            hydro_mult = 0.0
+            irrig_mult = 1.0
+
+        env_flow_t = env_flow_m3s[m]
+        env_target_vol = env_flow_t * d_days * 86400.0 / 1.0e6
+        env_actual_vol = min(env_target_vol, s_avail)
+
+        avail_frac = hydro_availability[m]
+        pre_release_level = np.interp(s_avail, evac_volume, evac_elevation)
+        if hydro_mult > 0:
+            trial_hydro_m3s = hydro_mult * design_discharge_hydro
+        else:
+            trial_hydro_m3s = env_flow_t
+        prelim_tailwater = np.interp(trial_hydro_m3s, tailwater_discharge_m3s, tailwater_elevation_m)
+        prelim_gross_head = pre_release_level - prelim_tailwater
+        prelim_net_head = prelim_gross_head - alpha * trial_hydro_m3s ** 2
+        turbine_physically_available = (
+            (avail_frac > 0) and (prelim_net_head >= min_head) and (pre_release_level >= mol_hydro)
+        )
+
+        turbine_capacity_m3s = avail_frac * design_discharge_hydro
+        hydro_target_m3s = (hydro_mult * design_discharge_hydro) if turbine_physically_available else 0.0
+
+        if turbine_physically_available and env_turbined:
+            hydro_release_m3s = min(max(hydro_target_m3s, env_flow_t), turbine_capacity_m3s)
+            hydro_release_vol_trial = hydro_release_m3s * d_days * 86400.0 / 1.0e6
+            env_via_turbine_vol = min(env_actual_vol, hydro_release_vol_trial)
+            bypass_needed_vol = max(0.0, env_actual_vol - env_via_turbine_vol)
+        else:
+            hydro_release_m3s = hydro_target_m3s
+            env_via_turbine_vol = 0.0
+            bypass_needed_vol = env_actual_vol
+
+        bypass_actual_vol = min(bypass_needed_vol, bypass_cap_m3s * d_days * 86400.0 / 1.0e6)
+        env_delivered_vol = env_via_turbine_vol + bypass_actual_vol
+        hydro_release_vol = hydro_release_m3s * d_days * 86400.0 / 1.0e6
+
+        irrigation_physically_available = pre_release_level >= mol_irrig
+        irrig_target_m3s = (
+            min(irrig_mult * irrig_demand_m3s[m], design_discharge_irrig)
+            if irrigation_physically_available else 0.0
+        )
+        irrig_release_vol = irrig_target_m3s * d_days * 86400.0 / 1.0e6
+
+        # Water supply: modeled the same way as irrigation -- predetermined demand,
+        # own physical intake MOL, own fixed design capacity, but shares irrig_mult
+        # (both are protected/curtailed together -- matches the legacy Excel model,
+        # where irrigation and water supply failed in the exact same months).
+        ws_physically_available = pre_release_level >= mol_water_supply
+        ws_target_m3s = (
+            min(irrig_mult * water_supply_demand_m3s[m], design_discharge_water_supply)
+            if ws_physically_available else 0.0
+        )
+        ws_release_vol = ws_target_m3s * d_days * 86400.0 / 1.0e6
+
+        baseline_vol = hydro_release_vol + bypass_actual_vol + irrig_release_vol + ws_release_vol
+        max_baseline_vol = min(s_avail, max_release_cap_m3s * d_days * 86400.0 / 1.0e6)
+        if baseline_vol > max_baseline_vol:
+            scale = (max_baseline_vol / baseline_vol) if baseline_vol > 0 else 0.0
+            env_delivered_vol *= scale
+            hydro_release_vol *= scale
+            bypass_actual_vol *= scale
+            irrig_release_vol *= scale
+            ws_release_vol *= scale
+            baseline_vol = max_baseline_vol
+
+        s_after_baseline = s_avail - baseline_vol
+
+        spill_vol = 0.0
+        if s_after_baseline > fsl_vol:
+            s_end_estimate = s_after_baseline
+            for _ in range(4):
+                rep_storage = 0.5 * (s_after_baseline + s_end_estimate)
+                rep_level = np.interp(rep_storage, evac_volume, evac_elevation)
+                spill_rate_m3s = np.interp(rep_level, spillway_elevation, spillway_discharge_m3s)
+                spill_vol_estimate = spill_rate_m3s * d_days * 86400.0 / 1.0e6
+                s_end_estimate = max(s_after_baseline - spill_vol_estimate, fsl_vol)
+            spill_vol = s_after_baseline - s_end_estimate
+            if s_end_estimate > safety_vol:
+                dam_safety_violation[t] = s_end_estimate - safety_vol
+
+        total_release_vol = baseline_vol + spill_vol
+        storage[t + 1] = s_avail - total_release_vol
+
+        level[t] = np.interp(storage[t + 1], evac_volume, evac_elevation)
+        hydro_release[t] = hydro_release_vol * 1.0e6 / (d_days * 86400.0)
+        irrig_release[t] = irrig_release_vol * 1.0e6 / (d_days * 86400.0)
+        ws_release[t] = ws_release_vol * 1.0e6 / (d_days * 86400.0)
+        env_release[t] = env_delivered_vol * 1.0e6 / (d_days * 86400.0)
+        env_bypass_release[t] = bypass_actual_vol * 1.0e6 / (d_days * 86400.0)
+        spillway_release[t] = spill_vol * 1.0e6 / (d_days * 86400.0)
+        total_release[t] = total_release_vol * 1.0e6 / (d_days * 86400.0)
+
+        irrig_shortfall[t] = max(0.0, irrig_demand_m3s[m] - irrig_release[t])
+        ws_shortfall[t] = max(0.0, water_supply_demand_m3s[m] - ws_release[t])
+
+        downstream_discharge_m3s = hydro_release[t] + spillway_release[t] + env_bypass_release[t]
+        tailwater_final = np.interp(downstream_discharge_m3s, tailwater_discharge_m3s, tailwater_elevation_m)
+        avg_level = 0.5 * (pre_release_level + level[t])
+        gross_head = max(avg_level - tailwater_final, 0.0)
+        headloss = alpha * hydro_release[t] ** 2
+        net_head = max(gross_head - headloss, 0.0)
+        power_kW = KW_PER_M3S_M * hydro_release[t] * net_head * turbine_eff
+        energy[t] = power_kW * d_days * 24.0 / 1000.0
+
+    return (storage, level, hydro_release, irrig_release, ws_release, env_release, env_bypass_release,
+            spillway_release, total_release, energy, evaporation, irrig_shortfall, ws_shortfall,
+            dam_safety_violation)
 
 
 @dataclass
@@ -147,6 +329,7 @@ class SimulationResult:
     level_m: np.ndarray                         # (T,) end-of-month elevation
     hydro_release_m3s: np.ndarray                # (T,)
     irrig_release_m3s: np.ndarray                # (T,)
+    ws_release_m3s: np.ndarray                    # (T,) water supply, modeled same as irrigation
     env_release_m3s: np.ndarray                  # (T,) actually delivered (turbine + bypass)
     env_bypass_release_m3s: np.ndarray            # (T,) portion of env_release_m3s NOT through the turbine
     spillway_release_m3s: np.ndarray              # (T,) physical spillway discharge (elevation-driven)
@@ -154,6 +337,7 @@ class SimulationResult:
     energy_MWh: np.ndarray                       # (T,)
     evaporation_Mm3: np.ndarray                   # (T,) monthly evaporation loss volume
     irrig_shortfall_m3s: np.ndarray               # (T,) demand - delivered, >= 0
+    ws_shortfall_m3s: np.ndarray                  # (T,) demand - delivered, >= 0
     dam_safety_violation_Mm3: np.ndarray          # (T,) > 0 only if spillway capacity was insufficient
 
 
@@ -163,200 +347,55 @@ def simulate(
     categories: np.ndarray,
     design_discharge_hydro: float,
     design_discharge_irrig: float,
+    design_discharge_water_supply: float | None = None,
+    initial_level_override: float | None = None,
 ) -> SimulationResult:
-    T = data.n_steps
-    days = data.days_in_month
+    """
+    design_discharge_water_supply defaults to data.scalars["design_discharge_water_supply_m3s"]
+    if not given (matching how design_discharge_irrig is typically pulled from
+    data.scalars["design_discharge_irrig_m3s"] by callers) -- it's fixed, not a
+    decision variable, same reasoning as irrigation.
+
+    initial_level_override, if given, replaces data.scalars["initial_level"]
+    for this call only (data itself is never mutated) -- used by
+    closure.find_initial_level_closure() to search for a self-consistent
+    starting level without needing a separate copy of the whole ReservoirData
+    object for every trial.
+    """
+    if design_discharge_water_supply is None:
+        design_discharge_water_supply = data.scalars["design_discharge_water_supply_m3s"]
 
     mol_vol = data.volume_from_elevation(data.scalars["min_operating_level"])
     fsl_vol = data.volume_from_elevation(data.scalars["max_operating_level"])
     safety_vol = data.volume_from_elevation(data.scalars["flood_control_level"])
-    mol_hydro = data.scalars["min_operating_level_hydro"]
-    mol_irrig = data.scalars["min_operating_level_irrig"]
-    min_head = data.scalars["min_hydropower_head"]
-    turbine_eff = data.scalars["turbine_efficiency"]
-    alpha = data.scalars["alpha_headloss_coeff"]
-    env_turbined = bool(data.scalars["environmental_flow_turbined"])
-    bypass_cap_m3s = data.scalars["bypass_outlet_capacity_m3s"]
-    max_release_cap_m3s = data.scalars["max_release_capacity_m3s"]  # non-spillway outlets combined
+    initial_level = initial_level_override if initial_level_override is not None else data.scalars["initial_level"]
+    initial_storage = data.volume_from_elevation(initial_level)
 
-    storage = np.empty(T + 1)
-    storage[0] = data.volume_from_elevation(data.scalars["initial_level"])
-
-    level = np.empty(T)
-    hydro_release = np.zeros(T)
-    irrig_release = np.zeros(T)
-    env_release = np.zeros(T)
-    env_bypass_release = np.zeros(T)
-    spillway_release = np.zeros(T)
-    total_release = np.zeros(T)
-    energy = np.zeros(T)
-    evaporation = np.zeros(T)
-    irrig_shortfall = np.zeros(T)
-    dam_safety_violation = np.zeros(T)
-
-    for t in range(T):
-        m = data.months[t] - 1  # 0-indexed month
-        cat = categories[t]
-        d_days = days[t]
-
-        inflow_vol = data.m3s_to_Mm3(data.inflow_m3s[t], d_days)
-
-        # --- losses (evaporation uses start-of-month area; see module docstring) ---
-        area = data.area_from_volume(storage[t])
-        evap_vol = data.evaporation_mm[m] * 1e-3 * area  # mm * km2 -> Mm3
-        seepage_vol = data.seepage_Mm3[m]
-
-        s_avail = max(storage[t] + inflow_vol - evap_vol - seepage_vol, 0.0)
-        evaporation[t] = evap_vol
-
-        # --- zone-based delivery targets ---
-        hydro_mult, irrig_mult = delivery_multipliers(s_avail, m, cat, policy)
-
-        # --- environmental flow: always prioritized (monthly requirement) ---
-        env_flow_t = data.env_flow_m3s[m]
-        env_target_vol = data.m3s_to_Mm3(env_flow_t, d_days)
-        env_actual_vol = min(env_target_vol, s_avail)
-
-        # --- turbine feasibility: maintenance derating + minimum NET head + intake MOL ---
-        # Preliminary estimate only -- spillway release isn't known yet (resolved
-        # below), so tailwater/headloss here use a trial discharge. The final
-        # energy calculation re-evaluates both precisely once hydro release AND
-        # spillway release are final (see module docstring).
-        #
-        # IMPORTANT: "physically available" (can the turbine run AT ALL this
-        # month) is now separate from "is there a discretionary generation
-        # target" (hydro_mult > 0, i.e. NOT in the Restricted zone). This
-        # matters because in the Restricted zone, hydro_mult is 0 but the
-        # turbine can still be physically capable of running -- and if
-        # environmental_flow_turbined is True, it SHOULD run, at exactly the
-        # environmental flow rate (free energy from water that has to pass
-        # through anyway), not be forced to 0 just because there's no
-        # discretionary target. If environmental_flow_turbined is False, the
-        # discretionary target being 0 in the Restricted zone naturally
-        # results in hydro_release_m3s = 0 further below, as intended.
-        avail_frac = data.hydro_availability[m]
-        pre_release_level = data.elevation_from_volume(s_avail)
-        trial_hydro_m3s = (hydro_mult * design_discharge_hydro) if hydro_mult > 0 else env_flow_t
-        prelim_tailwater = data.tailwater_elevation_from_discharge(trial_hydro_m3s)
-        prelim_gross_head = pre_release_level - prelim_tailwater
-        prelim_net_head = prelim_gross_head - alpha * trial_hydro_m3s ** 2
-        turbine_physically_available = (
-            (avail_frac > 0)
-            and (prelim_net_head >= min_head)
-            and (pre_release_level >= mol_hydro)
-        )
-        turbine_capacity_m3s = avail_frac * design_discharge_hydro
-        hydro_target_m3s = (hydro_mult * design_discharge_hydro) if turbine_physically_available else 0.0
-
-        if turbine_physically_available and env_turbined:
-            # environmental flow is a floor under hydro release, not additive; capped by turbine capacity.
-            # In the Restricted zone hydro_target_m3s is 0, so this correctly passes EXACTLY the
-            # environmental flow through the turbine (not more) -- see note above.
-            hydro_release_m3s = min(max(hydro_target_m3s, env_flow_t), turbine_capacity_m3s)
-            env_via_turbine_vol = min(env_actual_vol, data.m3s_to_Mm3(hydro_release_m3s, d_days))
-            bypass_needed_vol = max(0.0, env_actual_vol - env_via_turbine_vol)
-        else:
-            # either the turbine physically can't run this month, or environmental flow
-            # isn't routed through it -- always bypass in both cases
-            hydro_release_m3s = hydro_target_m3s
-            env_via_turbine_vol = 0.0
-            bypass_needed_vol = env_actual_vol
-
-        bypass_actual_vol = min(bypass_needed_vol, data.m3s_to_Mm3(bypass_cap_m3s, d_days))
-        env_delivered_vol = env_via_turbine_vol + bypass_actual_vol  # REPORTING metric only -- see note below
-        hydro_release_vol = data.m3s_to_Mm3(hydro_release_m3s, d_days)
-
-        # --- irrigation: target = mult * demand, capped by design (intake) capacity,
-        # forced to zero below the irrigation intake's own minimum operating level ---
-        irrigation_physically_available = pre_release_level >= mol_irrig
-        irrig_target_m3s = (
-            min(irrig_mult * data.irrig_demand_m3s[m], design_discharge_irrig)
-            if irrigation_physically_available else 0.0
-        )
-        irrig_release_vol = data.m3s_to_Mm3(irrig_target_m3s, d_days)
-
-        # Mass-balance release: hydro_release_vol ALREADY includes any turbined
-        # environmental-flow water (a floor under hydro release, not additive --
-        # see above), so it must NOT be added again here. Only hydro_release_vol
-        # (turbine, whatever its composition) + bypass_actual_vol (a physically
-        # separate outlet) + irrig_release_vol are physically distinct
-        # withdrawals from storage. env_delivered_vol is kept purely as a
-        # REPORTING metric (env_release_m3s below) -- summing it into the mass
-        # balance here would double-count the turbined portion of the
-        # environmental flow, over-depleting storage every month the turbine
-        # runs with environmental_flow_turbined=True.
-        baseline_vol = hydro_release_vol + bypass_actual_vol + irrig_release_vol
-        # cap at BOTH water availability AND the physical capacity of the combined
-        # power/irrigation outlets (max_release_capacity_m3s -- distinct from the
-        # spillway, which is handled separately below)
-        max_baseline_vol = min(s_avail, data.m3s_to_Mm3(max_release_cap_m3s, d_days))
-        if baseline_vol > max_baseline_vol:
-            scale = (max_baseline_vol / baseline_vol) if baseline_vol > 0 else 0.0
-            env_delivered_vol *= scale
-            hydro_release_vol *= scale
-            bypass_actual_vol *= scale
-            irrig_release_vol *= scale
-            baseline_vol = max_baseline_vol
-
-        s_after_baseline = s_avail - baseline_vol
-
-        # --- spillway routing (elevation-driven, not a policy decision) ---
-        spill_vol = 0.0
-        if s_after_baseline > fsl_vol:
-            # Fixed-point iteration: spill depends on elevation, elevation depends on
-            # spill. Start from the pre-spill (post-baseline-release) level as the
-            # first estimate, then refine using the average of pre/post-spill levels
-            # (same averaging approach used for the hydropower head below).
-            s_end_estimate = s_after_baseline
-            for _ in range(4):
-                rep_storage = 0.5 * (s_after_baseline + s_end_estimate)
-                rep_level = data.elevation_from_volume(rep_storage)
-                spill_rate_m3s = data.spillway_discharge_from_elevation(rep_level)
-                spill_vol_estimate = data.m3s_to_Mm3(spill_rate_m3s, d_days)
-                # spillway physically stops discharging once the pool recedes to FSL
-                s_end_estimate = max(s_after_baseline - spill_vol_estimate, fsl_vol)
-            spill_vol = s_after_baseline - s_end_estimate
-
-            if s_end_estimate > safety_vol:
-                # Even the rating curve's discharge at this elevation can't hold the
-                # ceiling -- genuine spillway-undersized failure. Do NOT clip storage
-                # here: clipping would silently break the mass balance and hide the
-                # failure from the hard constraint in optimize.py.
-                dam_safety_violation[t] = s_end_estimate - safety_vol
-
-        total_release_vol = baseline_vol + spill_vol
-        storage[t + 1] = s_avail - total_release_vol
-
-        # --- record ---
-        level[t] = data.elevation_from_volume(storage[t + 1])
-        hydro_release[t] = data.Mm3_to_m3s(hydro_release_vol, d_days)
-        irrig_release[t] = data.Mm3_to_m3s(irrig_release_vol, d_days)
-        env_release[t] = data.Mm3_to_m3s(env_delivered_vol, d_days)
-        env_bypass_release[t] = data.Mm3_to_m3s(bypass_actual_vol, d_days)
-        spillway_release[t] = data.Mm3_to_m3s(spill_vol, d_days)
-        total_release[t] = data.Mm3_to_m3s(total_release_vol, d_days)
-
-        irrig_shortfall[t] = max(0.0, data.irrig_demand_m3s[m] - irrig_release[t])
-
-        # --- final energy calculation: precise tailwater + headloss, using the
-        # ACTUAL final hydro + spillway + env-bypass releases (all now known).
-        # NOTE: if env flow was turbined this month, it's already inside
-        # hydro_release[t] -- only the bypass portion is added separately,
-        # to avoid double-counting it in the downstream discharge.
-        downstream_discharge_m3s = hydro_release[t] + spillway_release[t] + env_bypass_release[t]
-        tailwater_final = data.tailwater_elevation_from_discharge(downstream_discharge_m3s)
-        avg_level = 0.5 * (pre_release_level + level[t])
-        gross_head = max(avg_level - tailwater_final, 0.0)
-        headloss = alpha * hydro_release[t] ** 2
-        net_head = max(gross_head - headloss, 0.0)
-        power_kW = KW_PER_M3S_M * hydro_release[t] * net_head * turbine_eff
-        energy[t] = power_kW * d_days * 24.0 / 1000.0  # MWh
+    (storage, level, hydro_release, irrig_release, ws_release, env_release, env_bypass_release,
+     spillway_release, total_release, energy, evaporation, irrig_shortfall, ws_shortfall,
+     dam_safety_violation) = _simulate_core(
+        data.months, categories, data.inflow_m3s, data.days_in_month,
+        data.evac_elevation, data.evac_volume, data.evac_area,
+        data.spillway_elevation, data.spillway_discharge_m3s,
+        data.tailwater_discharge_m3s, data.tailwater_elevation_m,
+        data.evaporation_mm, data.seepage_Mm3, data.irrig_demand_m3s, data.water_supply_demand_m3s,
+        data.hydro_availability, data.env_flow_m3s,
+        policy.b2, policy.b3, policy.hydro_buffer_floor, policy.irrig_buffer_floor,
+        fsl_vol, safety_vol,
+        data.scalars["min_operating_level_hydro"], data.scalars["min_operating_level_irrig"],
+        data.scalars["min_operating_level_water_supply"],
+        data.scalars["min_hydropower_head"], data.scalars["turbine_efficiency"],
+        data.scalars["alpha_headloss_coeff"], bool(data.scalars["environmental_flow_turbined"]),
+        data.scalars["bypass_outlet_capacity_m3s"], data.scalars["max_release_capacity_m3s"],
+        design_discharge_hydro, design_discharge_irrig, design_discharge_water_supply, initial_storage,
+    )
 
     return SimulationResult(
         storage_Mm3=storage,
         level_m=level,
         hydro_release_m3s=hydro_release,
         irrig_release_m3s=irrig_release,
+        ws_release_m3s=ws_release,
         env_release_m3s=env_release,
         env_bypass_release_m3s=env_bypass_release,
         spillway_release_m3s=spillway_release,
@@ -364,5 +403,6 @@ def simulate(
         energy_MWh=energy,
         evaporation_Mm3=evaporation,
         irrig_shortfall_m3s=irrig_shortfall,
+        ws_shortfall_m3s=ws_shortfall,
         dam_safety_violation_Mm3=dam_safety_violation,
     )
