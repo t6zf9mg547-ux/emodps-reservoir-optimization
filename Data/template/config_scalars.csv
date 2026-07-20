@@ -1,0 +1,24 @@
+parameter,value,unit,description
+# --- Reservoir operating levels ---,,,
+min_operating_level,105,m,Absolute reservoir floor / top of dead storage (MOL) -- bottom of the live-storage range used by the zone policy
+max_operating_level,140,m,Normal maximum operating level / FSL
+flood_control_level,143,m,Surcharge/flood pool level (>= max_operating_level; set equal to max_operating_level if no separate flood pool)
+initial_level,120,m,Reservoir level at start of simulation (t=0)
+spillway_crest_level,140,m,Elevation above which uncontrolled spill occurs
+min_operating_level_hydro,108,m,"Powerhouse intake elevation -- below this level the intake is physically dry and hydropower is forced to zero, REGARDLESS of the zone policy. Must be >= min_operating_level. REPLACE with your actual intake elevation."
+min_operating_level_irrig,106,m,"Irrigation intake elevation -- below this level the intake is physically dry and irrigation is forced to zero, REGARDLESS of the zone policy. Must be >= min_operating_level. REPLACE with your actual intake elevation."
+warmup_years,2,years,Number of initial years discarded from objective evaluation (model spin-up)
+# --- Outlet / release constraints ---,,,
+max_release_capacity_m3s,300,m3/s,"Physical capacity of the combined power/irrigation outlets (turbine + bypass + irrigation intake), EXCLUDING the spillway -- spillway discharge is governed separately by spillway_rating_curve.csv."
+environmental_flow_turbined,TRUE,boolean,"If True, the environmental flow normally passes through the turbines and counts toward hydropower energy AND hydropower's release (a floor under it, not additive) WHENEVER the turbines are running. If False, it always goes through the bypass and generates zero energy. In BOTH cases, whenever the turbines are off (Restricted zone, or a maintenance/unavailability month), the environmental flow is released through the bypass outlet instead -- it is never skipped. Monthly flow requirement is in environmental_flow_monthly.csv."
+bypass_outlet_capacity_m3s,15,m3/s,Capacity of the non-powered bypass/low-level outlet used to release environmental flow whenever the turbines are off. REPLACE with your actual outlet works capacity; must be >= the maximum monthly value in environmental_flow_monthly.csv or environmental flow cannot always be guaranteed.
+# --- Hydropower ---,,,
+turbine_efficiency,0.9,fraction,Overall plant efficiency (flat; revisit if head-dependent needed)
+min_hydropower_head,10,m,Minimum NET head (after headloss) below which turbines cannot operate
+alpha_headloss_coeff,0.0008,s2/m5,"Waterway headloss coefficient: DH = alpha * hydro_discharge^2 (Q in m3/s, DH in m). Net head = gross head (reservoir level - tailwater level) minus DH. REPLACE with a value derived from your penstock/waterway design (length, diameter, roughness, trashrack losses, etc.)."
+design_discharge_hydro_min,20,m3/s,Lower bound for hydropower design discharge decision variable
+design_discharge_hydro_max,80,m3/s,Upper bound for hydropower design discharge decision variable
+# --- Irrigation ---,,,
+design_discharge_irrig_m3s,32,m3/s,"FIXED irrigation intake/canal capacity, not a decision variable -- since irrig_target = min(irrig_mult * demand, this value), any capacity above peak monthly demand (irrigation_demand_monthly.csv) buys nothing (irrigation reliability is capped at meeting a fixed demand, unlike hydropower which always benefits from more capacity). Must be >= max monthly demand; set a small margin above peak demand for operational flexibility. REPLACE with your actual/planned intake capacity."
+# --- Simulation ---,,,
+timestep,monthly,-,Simulation time step (fixed)

@@ -1,0 +1,25 @@
+elevation_m,volume_Mm3,surface_area_km2
+# Elevation-Volume-Area curve. Monotonically increasing elevation.,,
+# Any number of points is fine -- use as many as needed to represent your actual bathymetry accurately; more points give smoother np.interp behavior  but there is no fixed/required row count.,,
+# Spans below min_operating_level and above flood_control_level so both are safely inside the interpolation range (see config_scalars.csv).,,
+# Replace all rows below with your actual survey/bathymetry data.,,
+95,0,0
+98,4.2,0.9
+101,9.8,1.6
+104,18.5,2.4
+107,31,3.3
+110,48.5,4.3
+113,71.5,5.4
+116,101,6.6
+119,137.5,7.9
+122,182,9.3
+125,235,10.8
+128,297,12.4
+131,368.5,14.1
+134,450,15.9
+137,542,17.8
+140,645,19.8
+143,759.5,21.9
+146,886,24.1
+149,1025,26.4
+152,1177,28.8

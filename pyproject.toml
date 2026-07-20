@@ -1,33 +1,24 @@
 # ---------------------------------------------------------------------------
-# Template pyproject.toml — copy into a new project folder, then:
-#   1. Update `name` and `description` below
-#   2. Run `uv sync` to create .venv and install everything listed here
-#   3. Add/remove packages as needed with `uv add <pkg>` / `uv remove <pkg>`
+# pyproject.toml — EMODPS_Reservoir_Optimization
+#   Run `uv sync` to create .venv and install everything listed here.
+#   Add/remove packages as needed with `uv add <pkg>` / `uv remove <pkg>`.
 # ---------------------------------------------------------------------------
 
 [project]
-name = "change-me"                     # e.g. "extract-drainage-system"
+name = "emodps-reservoir-optimization"
 version = "0.1.0"
-description = "Change me: one-line description of what this project does"
-requires-python = ">=3.13"
+description = "Joint design + operating-policy optimization for a multi-purpose reservoir (hydropower, irrigation, dam safety) via monthly mass-balance simulation and NSGA-II, following the EMODPS approach."
+requires-python = ">=3.10"
 dependencies = [
-    "geopandas>=1.0",
-    "pandas>=2.2",
-    "fiona>=1.10.1",
-    "shapely>=2.0",
     "numpy>=2.0",
-    "pyproj>=3.6",
+    "pandas>=2.2",
+    "pymoo>=0.6",
+    "matplotlib>=3.9",
 ]
 
 # Notes:
-# - tkinter is part of the Python standard library — do NOT add it here.
-#   Just make sure the Python build you're using includes it (standard on
-#   macOS python.org / Homebrew builds).
-# - GDAL itself must still be installed at the system level for fiona/
-#   geopandas to work: `brew install gdal`.
 # - Add project-specific extras as needed, e.g.:
-#     "tqdm>=4.66",       # progress bars for batch delineation
-#     "pyogrio>=0.9",     # faster I/O backend, alternative to fiona
+#     "tqdm>=4.66",        # progress bars for long optimization runs
 
 [tool.uv]
 # This is a scripts project (Module/), not an installable library —

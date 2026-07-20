@@ -1,0 +1,16 @@
+month,flow_m3s
+# Mandatory minimum downstream environmental flow  by calendar month.,
+# Always prioritized ahead of hydropower/irrigation allocation (see simulator.py). ,
+#Replace with your actual environmental flow regime (e.g. a percentage-of-natural-flow rule  or a regulatory requirement).,
+1,4
+2,4
+3,5
+4,6
+5,7
+6,6
+7,5
+8,4.5
+9,4
+10,4
+11,4
+12,4

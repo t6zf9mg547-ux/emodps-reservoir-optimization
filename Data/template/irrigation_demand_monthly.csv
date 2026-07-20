@@ -1,0 +1,16 @@
+month,demand_m3s,priority_weight
+# Climatological monthly irrigation target diversion (12 rows).
+# priority_weight: relative allocation priority vs other uses in deficit months (1.0 = baseline).
+# Replace with your cropping-pattern-derived demand curve.
+1,10.0,1.0
+2,12.0,1.0
+3,18.0,1.0
+4,25.0,1.2
+5,30.0,1.2
+6,28.0,1.2
+7,22.0,1.0
+8,18.0,1.0
+9,15.0,1.0
+10,12.0,1.0
+11,8.0,1.0
+12,8.0,1.0

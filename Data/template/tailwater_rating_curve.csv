@@ -1,0 +1,15 @@
+discharge_m3s,tailwater_elevation_m
+# Downstream tailrace stage-discharge rating curve. discharge_m3s here is hydropower release + spillway release + environmental flow bypass (the portion of environmental flow NOT routed through the turbine -- see environmental_flow_turbined in config_scalars.csv).,
+#  Irrigation is EXCLUDED (assumed diverted away from the tailrace channel). ,
+# If environmental flow IS routed through the turbine that month  it's already counted within the hydropower discharge  not added again.,
+# Replace with your actual tailrace rating curve (e.g. from a downstream gauge or hydraulic model).,
+0,100
+20,100.6
+50,101.3
+100,102.1
+150,102.7
+200,103.2
+250,103.6
+300,104
+400,104.6
+500,105.1

@@ -1,0 +1,17 @@
+month,availability_fraction
+# Climatological fraction of hydropower design discharge/capacity actually available each month (1.0 = all units online  e.g. 0.7 = 30% of capacity offline for scheduled maintenance that month). ,
+# Applied as a derating factor on top of the design discharge: available_discharge(month) = design_discharge_hydro * availability_fraction(month).,
+# Does NOT affect the bypass outlet or irrigation -- maintenance outages are assumed specific to the powerhouse units.,
+# Replace with your actual planned maintenance schedule (typically scheduled during low-demand or low-flow months).,
+1,1
+2,1
+3,0.85
+4,0.85
+5,1
+6,1
+7,1
+8,1
+9,0.9
+10,0.9
+11,1
+12,1

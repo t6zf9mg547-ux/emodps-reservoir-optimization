@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# .gitignore template for uv-based Python projects (geopandas/GIS scripts)
+# .gitignore for EMODPS_Reservoir_Optimization (uv-based Python project)
 # ---------------------------------------------------------------------------
 
 # Virtual environment
@@ -35,10 +35,16 @@ Thumbs.db
 # Jupyter
 .ipynb_checkpoints/
 
-# Project data & outputs - regenerated / local-only, not tracked in git
-Data/
+# Project outputs - regenerated / local-only, not tracked in git
 Output/
 Plot/
+
+# Data/ - only the template/example input files (Data/template/) are tracked
+# in git, so collaborators have a reference dataset with the expected schema.
+# Real project data, dropped directly in Data/, stays local-only.
+Data/*
+!Data/template/
+!Data/template/**
 
 # Logs
 *.log

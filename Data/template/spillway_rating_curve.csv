@@ -1,0 +1,11 @@
+elevation_m,discharge_m3s
+# Uncontrolled/gated spillway rating curve. Valid ONLY between max_operating_level (FSL  spillway crest -- zero discharge) and flood_control_level (top of curve).,
+# Beyond this range the loader will flat-extrapolate the nearest endpoint value which is a simplifying assumption -- flag if you need the model to instead treat storage above flood_control_level as an explicit failure state.,
+# Replace with your actual spillway design rating curve (e.g. from Q = C*L*H^1.5 for an ogee crest or your gate operation curve if gated).,
+140,0
+140.5,19.1
+141,53.9
+141.5,99
+142,152.4
+142.5,213.1
+143,280
