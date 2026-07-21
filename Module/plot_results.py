@@ -522,6 +522,53 @@ def plot_solution_climatology(data, categories, x, out_path: str | Path, solutio
 # 7. Windowed raw time series for one solution
 # ---------------------------------------------------------------------------
 
+def export_timeseries_csv(data, categories, x, out_path: str | Path, n_years: int | str = 10,
+                           start_offset_years: int = 0, solution_index: int | None = None):
+    """
+    CSV export of everything plot_solution_timeseries() shows (same window,
+    same start/end logic) -- level, all release streams, energy, evaporation,
+    shortfalls, inflow -- one row per month. Saved under Output/ rather than
+    Plot/, matching the CSV-goes-in-Output/images-go-in-Plot convention used
+    elsewhere (e.g. export_rule_curve_csv).
+    """
+    result = _simulate_solution(data, categories, x)
+    mask = _warmup_mask(data)
+    start = np.where(mask)[0][0] + start_offset_years * 12
+
+    n_years_requested = data.n_steps if n_years == "full" else int(n_years)
+    end = min(start + n_years_requested * 12, data.n_steps)
+
+    df = pd.DataFrame({
+        "year": data.years[start:end],
+        "month": data.months[start:end],
+        "inflow_m3s": data.inflow_m3s[start:end],
+        "storage_Mm3": result.storage_Mm3[start:end],
+        "level_m": result.level_m[start:end],
+        "hydro_release_m3s": result.hydro_release_m3s[start:end],
+        "irrig_release_m3s": result.irrig_release_m3s[start:end],
+        "ws_release_m3s": result.ws_release_m3s[start:end],
+        "env_release_m3s": result.env_release_m3s[start:end],
+        "env_bypass_release_m3s": result.env_bypass_release_m3s[start:end],
+        "spillway_release_m3s": result.spillway_release_m3s[start:end],
+        "total_release_m3s": result.total_release_m3s[start:end],
+        "energy_MWh": result.energy_MWh[start:end],
+        "evaporation_Mm3": result.evaporation_Mm3[start:end],
+        "irrig_shortfall_m3s": result.irrig_shortfall_m3s[start:end],
+        "ws_shortfall_m3s": result.ws_shortfall_m3s[start:end],
+        "dam_safety_violation_Mm3": result.dam_safety_violation_Mm3[start:end],
+    })
+
+    meta_lines = [
+        f"# solution_index,{solution_index if solution_index is not None else ''}",
+        f"# min_operating_level_m,{data.scalars['min_operating_level']}",
+        f"# max_operating_level_m,{data.scalars['max_operating_level']}",
+        f"# flood_control_level_m,{data.scalars['flood_control_level']}",
+    ]
+    with open(out_path, "w") as f:
+        f.write("\n".join(meta_lines) + "\n")
+        df.to_csv(f, index=False)
+
+
 def plot_solution_timeseries(data, categories, x, out_path: str | Path, n_years: int | str = 10,
                               start_offset_years: int = 0, solution_index: int | None = None):
     """
@@ -744,3 +791,8 @@ if __name__ == "__main__":
         plot_solution_timeseries(data, categories, x, ts_path, n_years=years_arg,
                                   start_offset_years=args.start_offset_years, solution_index=solution_index)
         print(f"Saved {ts_path}")
+
+        ts_csv_path = Path(output_dir) / f"solution_{solution_index}_timeseries.csv"
+        export_timeseries_csv(data, categories, x, ts_csv_path, n_years=years_arg,
+                               start_offset_years=args.start_offset_years, solution_index=solution_index)
+        print(f"Saved {ts_csv_path}")

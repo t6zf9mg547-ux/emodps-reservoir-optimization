@@ -97,13 +97,19 @@ class ReservoirProblem(ElementwiseProblem):
     in config_scalars.csv), not a decision variable -- see objectives.py.
     """
 
-    def __init__(self, data, categories):
+    def __init__(self, data, categories, hydro_min: float | None = None, hydro_max: float | None = None):
+        """
+        hydro_min/hydro_max override config_scalars.csv's design_discharge_hydro_min/max
+        if given -- useful for a targeted re-optimization within a narrowed capacity
+        band (e.g. to test whether a gap in a previous Pareto front is a real
+        discontinuity or just under-sampling), without editing the CSV by hand.
+        """
         xl = np.concatenate([
-            [data.scalars["design_discharge_hydro_min"]],
+            [hydro_min if hydro_min is not None else data.scalars["design_discharge_hydro_min"]],
             np.zeros(N_POLICY_PARAMS),
         ])
         xu = np.concatenate([
-            [data.scalars["design_discharge_hydro_max"]],
+            [hydro_max if hydro_max is not None else data.scalars["design_discharge_hydro_max"]],
             np.ones(N_POLICY_PARAMS),
         ])
         super().__init__(n_var=xl.shape[0], n_obj=3, n_ieq_constr=1, xl=xl, xu=xu)
@@ -141,6 +147,8 @@ def run_optimization(
     pop_size: int = POP_SIZE,
     n_gen: int = N_GENERATIONS,
     seed: int = RANDOM_SEED,
+    hydro_min: float | None = None,
+    hydro_max: float | None = None,
     verbose: bool = True,
 ):
     """
@@ -155,6 +163,15 @@ def run_optimization(
     Data/Mandrare -> Output/Mandrare/) -- so results from different
     datasets/scenarios never overwrite each other. Pass an explicit path
     to bypass this and use it verbatim instead.
+
+    hydro_min/hydro_max override config_scalars.csv's
+    design_discharge_hydro_min/max if given -- for a targeted
+    re-optimization within a narrowed capacity band (e.g. to test whether
+    a gap in a previous Pareto front is a real discontinuity or just
+    under-sampling), without editing the CSV by hand. When used, saving
+    to a DIFFERENT output_dir than your main run is strongly recommended
+    (e.g. append a suffix to the case name) so this doesn't overwrite your
+    full-range results.
     """
     if data_dir is None:
         default_data_dir = Path(__file__).resolve().parent.parent / "Data"
@@ -167,10 +184,12 @@ def run_optimization(
         output_dir = str(project_root / "Output" / case_name)
     if verbose:
         print(f"Case: {case_name}  ->  results will be saved to {output_dir}/")
+        if hydro_min is not None or hydro_max is not None:
+            print(f"  NOTE: hydro design discharge bounds overridden to [{hydro_min}, {hydro_max}]")
 
     data = load_reservoir_data(data_dir)
     categories = compute_forecast_categories(data.months, data.inflow_m3s)
-    problem = ReservoirProblem(data, categories)
+    problem = ReservoirProblem(data, categories, hydro_min=hydro_min, hydro_max=hydro_max)
 
     # Hypervolume reference point: worst plausible value in each (minimized) dimension.
     # -energy and -reliability are both bounded above by 0 (zero energy / zero reliability).
@@ -252,6 +271,16 @@ if __name__ == "__main__":
              f"given: {N_GENERATIONS} (the 'full' preset's value).",
     )
     parser.add_argument("--seed", type=int, default=RANDOM_SEED, help=f"Random seed (default: {RANDOM_SEED}).")
+    parser.add_argument(
+        "--hydro-min", type=float, default=None,
+        help="Override design_discharge_hydro_min for this run only (doesn't touch config_scalars.csv). "
+             "Useful for a targeted re-optimization within a narrowed capacity band, e.g. to test "
+             "whether a gap in a previous Pareto front is real or just under-sampling.",
+    )
+    parser.add_argument(
+        "--hydro-max", type=float, default=None,
+        help="Override design_discharge_hydro_max for this run only. See --hydro-min.",
+    )
     args = parser.parse_args()
 
     preset = PRESETS.get(args.preset, {})
@@ -264,4 +293,6 @@ if __name__ == "__main__":
         pop_size=pop_size,
         n_gen=n_gen,
         seed=args.seed,
+        hydro_min=args.hydro_min,
+        hydro_max=args.hydro_max,
     )
