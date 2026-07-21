@@ -153,6 +153,18 @@ def plot_pareto_matrix(F: pd.DataFrame, X: pd.DataFrame, out_path: str | Path, h
         if energy_is_x:
             secax = ax.secondary_xaxis("top", functions=(energy_to_hydro_Q, hydro_Q_to_energy))
             secax.set_xlabel("Hydro design discharge (m3/s, approx.)", fontsize=8.5)
+            # Derive secondary-axis ticks directly from the primary axis's own tick
+            # positions (already well-spaced and edge-aware), rather than letting
+            # matplotlib's independent auto-locator choose secondary-axis ticks on
+            # its own -- when the two axes' scales differ a lot (as they do when
+            # most points cluster tightly on one side), the independent locator's
+            # label-thinning can bunch/drop labels inconsistently, leaving large
+            # unlabeled gaps. Tying secondary ticks 1:1 to primary ticks guarantees
+            # full-width coverage by construction.
+            xlim = ax.get_xlim()
+            primary_ticks = np.array([t for t in ax.get_xticks() if xlim[0] <= t <= xlim[1]])
+            secax.set_xticks(energy_to_hydro_Q(primary_ticks))
+            secax.set_xticklabels([f"{v:.1f}" for v in energy_to_hydro_Q(primary_ticks)])
 
     fig.suptitle(f"Pareto front ({len(F)} solutions)")
     footnote = (
@@ -166,8 +178,11 @@ def plot_pareto_matrix(F: pd.DataFrame, X: pd.DataFrame, out_path: str | Path, h
     if ws_reliability is not None:
         footnote += (
             " Water supply reliability is NOT one of the 3 objectives NSGA-II "
-            "optimizes -- it's computed here just for this comparison, using the "
-            "same shared zone multiplier as irrigation (see simulator.py)."
+            "optimizes -- it's computed here just for this comparison. Irrigation "
+            "and water supply each taper independently to their OWN MOL in the "
+            "Restricted zone (see policy.py); a near-identical diagonal here "
+            "usually means both MOLs happen to be configured to the same "
+            "elevation, not that they share a multiplier."
         )
     fig.text(0.5, 0.005, footnote, ha="center", va="bottom", fontsize=7.5, color="#555555", wrap=True)
     fig.tight_layout(rect=(0, 0.035, 1, 1))
