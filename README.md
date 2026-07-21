@@ -219,9 +219,38 @@ the loader.
   Buffer / Restricted), with separate boundary sets for dry / normal /
   wet inflow-forecast categories (perfect-foresight 3-month-ahead
   classification). See `policy.py` docstring for the full zone logic.
-- **Decision vector** (111 variables, fed to NSGA-II): design discharge
-  for hydropower + 110 policy genes (unit hypercube, decoded into a
+  **Buffer and Restricted zones are asymmetric by design**: the Buffer
+  zone curtails hydropower ONLY (irrigation and water supply stay at
+  100% target throughout it); the Restricted zone sets hydropower's
+  discretionary target to 0% (still subject to the environmental-flow
+  floor, if turbined) AND tapers irrigation/water supply linearly from
+  100% at the Buffer/Restricted boundary down to 0% at their own MOL --
+  a graceful decline into the hard physical cutoff, rather than staying
+  at 100% and cliff-dropping to 0% at MOL. This reflects a deliberate
+  priority choice (irrigation/water supply protected ahead of
+  hydropower under scarcity) implemented as a proper monotonic
+  cascading-priority curtailment scheme -- see `policy.py`'s "Design
+  history / rejected alternatives" docstring section for what was tried
+  and rejected before landing here (an earlier version applied the same
+  Buffer taper to irrigation, then had it snap back to 100% in the
+  Restricted zone -- non-monotonic, indefensible operating practice, and
+  the reason this design was revised).
+  **POSSIBLE FUTURE IMPLEMENTATION, not yet done, flagged for the
+  record**: the Restricted-zone taper for irrigation/water supply
+  currently reuses their existing MOL boundary as its zero-point, at no
+  cost to the decision vector -- the SLOPE of that decline is entirely
+  fixed by wherever MOL sits, not tunable. A genuinely optimizable
+  Restricted-zone floor parameter per service (analogous to
+  `hydro_buffer_floor`) would let the search control how gently or
+  sharply irrigation/water supply decline through the Restricted zone,
+  at the cost of 1-2 more decision variables. Revisit if the current
+  fixed-slope taper looks too abrupt or too gentle in practice.
+- **Decision vector** (110 variables, fed to NSGA-II): design discharge
+  for hydropower + 109 policy genes (unit hypercube, decoded into a
   guaranteed-feasible, ordered rule curve -- see `policy.decode_policy`).
+  Only 1 floor parameter (`hydro_buffer_floor`) exists now -- irrigation/
+  water supply no longer have a Buffer-zone floor of their own, since
+  they don't taper in the Buffer zone at all (see above).
   Irrigation design discharge is NOT a decision variable -- it's fixed at
   `design_discharge_irrig_m3s` in `config_scalars.csv` (recommended:
   peak monthly demand + a small margin). Unlike hydropower, capacity
@@ -233,11 +262,10 @@ the loader.
   monthly demand (`water_supply_demand_monthly.csv`), a fixed design
   capacity (`design_discharge_water_supply_m3s`, not a decision variable,
   same reasoning as irrigation), and its own physical intake elevation
-  (`min_operating_level_water_supply`). Shares irrigation's zone
-  multiplier -- both are protected/curtailed together, matching the
-  legacy Excel model this project was compared against (irrigation and
-  water supply failed in the exact same months there). Not currently a
-  4th Pareto objective -- tracked as its own reliability/shortfall metric
+  (`min_operating_level_water_supply`). Has its OWN Restricted-zone
+  taper (own MOL, see above) -- no longer shares a single multiplier
+  with irrigation, since each now tapers to its own MOL independently.
+  Not currently a 4th Pareto objective -- tracked as its own reliability/shortfall metric
   in `diagnostics.py`, but its water use already affects all 3 existing
   objectives (energy, irrigation reliability, spillage) through the mass
   balance, correctly.

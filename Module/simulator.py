@@ -150,7 +150,7 @@ def _simulate_core(
     tailwater_discharge_m3s, tailwater_elevation_m,
     evaporation_mm, seepage_Mm3, irrig_demand_m3s, water_supply_demand_m3s,
     hydro_availability, env_flow_m3s,
-    policy_b2, policy_b3, hydro_buffer_floor, irrig_buffer_floor,
+    policy_b2, policy_b3, hydro_buffer_floor, mol_irrig_vol, mol_ws_vol,
     fsl_vol, safety_vol, mol_hydro, mol_irrig, mol_water_supply, min_head, turbine_eff, alpha,
     env_turbined, bypass_cap_m3s, max_release_cap_m3s,
     design_discharge_hydro, design_discharge_irrig, design_discharge_water_supply, initial_storage,
@@ -162,14 +162,19 @@ def _simulate_core(
     exists ONLY for speed, not to change any behavior. Takes plain arrays
     and scalars (no ReservoirData/PolicyParams objects, since numba can't
     jit arbitrary Python class methods) -- delivery_multipliers' logic is
-    inlined directly using policy_b2/policy_b3 + the two floor fractions,
-    and every data.<method>() lookup becomes a direct np.interp() call
-    against the corresponding raw array.
+    inlined directly using policy_b2/policy_b3 + hydro_buffer_floor, and
+    every data.<method>() lookup becomes a direct np.interp() call against
+    the corresponding raw array.
 
     Water supply is modeled the same way as irrigation (predetermined
-    demand, own physical intake MOL, own fixed design capacity) but shares
-    irrig_mult -- both are protected/curtailed together, matching the
-    legacy Excel model this project was compared against.
+    demand, own physical intake MOL, own fixed design capacity). They no
+    longer share one multiplier: both stay flat at 100% through the Buffer
+    zone (hydropower alone tapers there -- see policy.py's module
+    docstring), then each tapers independently through the Restricted zone
+    down to its OWN MOL (mol_irrig_vol / mol_ws_vol, in volume terms --
+    distinct from mol_irrig / mol_water_supply below, which are the same
+    physical thresholds in ELEVATION terms, used for the separate hard
+    physical cutoff check further down).
     """
     T = months.shape[0]
     storage = np.empty(T + 1)
@@ -202,19 +207,33 @@ def _simulate_core(
         s_avail = max(storage[t] + inflow_vol - evap_vol - seepage_vol, 0.0)
         evaporation[t] = evap_vol
 
-        # --- zone-based delivery targets (delivery_multipliers, inlined) ---
+        # --- zone-based delivery targets (policy.delivery_multipliers, inlined) ---
         b2v = policy_b2[cat, m]
         b3v = policy_b3[cat, m]
         if s_avail >= b2v:
+            # Conservation/Flood: all three services at 100%
             hydro_mult = 1.0
             irrig_mult = 1.0
+            ws_mult = 1.0
         elif s_avail >= b3v:
+            # Buffer: HYDROPOWER ONLY tapers; irrigation/water supply stay flat at 100%
             frac = (s_avail - b3v) / max(b2v - b3v, 1e-9)
             hydro_mult = hydro_buffer_floor + frac * (1.0 - hydro_buffer_floor)
-            irrig_mult = irrig_buffer_floor + frac * (1.0 - irrig_buffer_floor)
-        else:
-            hydro_mult = 0.0
             irrig_mult = 1.0
+            ws_mult = 1.0
+        else:
+            # Restricted: hydro's discretionary target is 0 (still subject to the
+            # environmental-flow floor below); irrigation/water supply taper
+            # linearly from 1.0 at b3v down to 0.0 at their OWN MOL.
+            hydro_mult = 0.0
+            if s_avail <= mol_irrig_vol:
+                irrig_mult = 0.0
+            else:
+                irrig_mult = min((s_avail - mol_irrig_vol) / max(b3v - mol_irrig_vol, 1e-9), 1.0)
+            if s_avail <= mol_ws_vol:
+                ws_mult = 0.0
+            else:
+                ws_mult = min((s_avail - mol_ws_vol) / max(b3v - mol_ws_vol, 1e-9), 1.0)
 
         env_flow_t = env_flow_m3s[m]
         env_target_vol = env_flow_t * d_days * 86400.0 / 1.0e6
@@ -258,12 +277,12 @@ def _simulate_core(
         irrig_release_vol = irrig_target_m3s * d_days * 86400.0 / 1.0e6
 
         # Water supply: modeled the same way as irrigation -- predetermined demand,
-        # own physical intake MOL, own fixed design capacity, but shares irrig_mult
-        # (both are protected/curtailed together -- matches the legacy Excel model,
-        # where irrigation and water supply failed in the exact same months).
+        # own physical intake MOL, own fixed design capacity, own zone multiplier
+        # (ws_mult, distinct from irrig_mult since each tapers to its OWN MOL in
+        # the Restricted zone -- see the zone-based delivery targets above).
         ws_physically_available = pre_release_level >= mol_water_supply
         ws_target_m3s = (
-            min(irrig_mult * water_supply_demand_m3s[m], design_discharge_water_supply)
+            min(ws_mult * water_supply_demand_m3s[m], design_discharge_water_supply)
             if ws_physically_available else 0.0
         )
         ws_release_vol = ws_target_m3s * d_days * 86400.0 / 1.0e6
@@ -368,6 +387,12 @@ def simulate(
     mol_vol = data.volume_from_elevation(data.scalars["min_operating_level"])
     fsl_vol = data.volume_from_elevation(data.scalars["max_operating_level"])
     safety_vol = data.volume_from_elevation(data.scalars["flood_control_level"])
+    # Volume-space MOL for irrigation/water supply, needed for the Restricted-zone
+    # taper (which operates on storage/volume, like b2/b3) -- distinct from the
+    # ELEVATION-space MOL scalars passed in below, used for the separate hard
+    # physical cutoff check (which operates on pre_release_level/elevation).
+    mol_irrig_vol = data.volume_from_elevation(data.scalars["min_operating_level_irrig"])
+    mol_ws_vol = data.volume_from_elevation(data.scalars["min_operating_level_water_supply"])
     initial_level = initial_level_override if initial_level_override is not None else data.scalars["initial_level"]
     initial_storage = data.volume_from_elevation(initial_level)
 
@@ -380,7 +405,7 @@ def simulate(
         data.tailwater_discharge_m3s, data.tailwater_elevation_m,
         data.evaporation_mm, data.seepage_Mm3, data.irrig_demand_m3s, data.water_supply_demand_m3s,
         data.hydro_availability, data.env_flow_m3s,
-        policy.b2, policy.b3, policy.hydro_buffer_floor, policy.irrig_buffer_floor,
+        policy.b2, policy.b3, policy.hydro_buffer_floor, mol_irrig_vol, mol_ws_vol,
         fsl_vol, safety_vol,
         data.scalars["min_operating_level_hydro"], data.scalars["min_operating_level_irrig"],
         data.scalars["min_operating_level_water_supply"],

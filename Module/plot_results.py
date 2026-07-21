@@ -261,7 +261,14 @@ def plot_rule_curve(data, x, out_path: str | Path, solution_index: int | None = 
 
     axes[0].set_ylabel("Elevation (m)")
     axes[0].legend(loc="lower right", fontsize=8, framealpha=0.9)
-    fig.tight_layout()
+    fig.text(
+        0.5, 0.005,
+        "Buffer zone curtails HYDROPOWER ONLY (irrigation/water supply stay at 100%). "
+        "Restricted zone: hydropower's discretionary target is 0%; irrigation/water "
+        "supply taper linearly to 0% at their own MOL (see policy.py).",
+        ha="center", va="bottom", fontsize=7.5, color="#555555", wrap=True,
+    )
+    fig.tight_layout(rect=(0, 0.03, 1, 1))
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
 
@@ -293,7 +300,8 @@ def export_rule_curve_csv(data, x, out_path: str | Path):
         f"# design_discharge_hydro_m3s,{design_discharge_hydro}",
         f"# design_discharge_irrig_m3s,{design_discharge_irrig}",
         f"# hydro_buffer_floor_fraction,{policy.hydro_buffer_floor}",
-        f"# irrig_buffer_floor_fraction,{policy.irrig_buffer_floor}",
+        f"# note,irrigation/water_supply are flat at 100% through Buffer; hydropower alone tapers there",
+        f"# note,irrigation/water_supply taper linearly through Restricted down to their own MOL (see policy.py)",
     ]
     with open(out_path, "w") as f:
         f.write("\n".join(meta_lines) + "\n")

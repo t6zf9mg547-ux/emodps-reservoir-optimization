@@ -8,7 +8,7 @@
 name = "emodps-reservoir-optimization"
 version = "0.1.0"
 description = "Joint design + operating-policy optimization for a multi-purpose reservoir (hydropower, irrigation, dam safety) via monthly mass-balance simulation and NSGA-II, following the EMODPS approach."
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.0",
     "pandas>=2.2",
@@ -16,6 +16,9 @@ dependencies = [
     "matplotlib>=3.9",
     "numba>=0.60",
 ]
+
+[project.optional-dependencies]
+comparison = ["ctrl-freak>=0.2"]
 
 # Notes:
 # - Add project-specific extras as needed, e.g.:
