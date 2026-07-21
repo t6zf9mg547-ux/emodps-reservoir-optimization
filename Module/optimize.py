@@ -2,9 +2,9 @@
 optimize.py
 
 pymoo NSGA-II driver for the joint EMODPS-style design + operating policy
-optimization. Decision vector (111 variables):
+optimization. Decision vector (110 variables):
     x[0]   = design_discharge_hydro   (m3/s, real bounds from config_scalars.csv)
-    x[1:]  = 110 policy genes (unit hypercube -- see policy.py)
+    x[1:]  = 109 policy genes (unit hypercube -- see policy.py)
 
 Irrigation design discharge is NOT a decision variable -- it's fixed at
 design_discharge_irrig_m3s in config_scalars.csv (per-conversation
@@ -49,15 +49,25 @@ always override a preset):
     analysis: higher resolution than earlier runs (was pop=150) at a
     modest extra time cost, per-conversation decision.
 
-Performance: ~13 ms/evaluation on a 30-year synthetic record, ~31 ms/eval
-on a 71.9-year real record (see chat benchmarks) -- runtime scales
-roughly linearly with inflow record length. Rough estimates:
-  - quick (30x30=900 evals):      <1 min (either record length)
-  - full, 30-yr record (250x300=75,000 evals):  ~16 min
-  - full, 72-yr record (250x300=75,000 evals):  ~39 min
+Performance: simulate() is numba-jitted (see simulator.py) -- measured at
+~0.55 ms/evaluation on a 30-year record, ~28x faster than the pre-numba
+pure-Python baseline (~15.5 ms/eval). A full 250x300=75,000-evaluation
+run on that 30-year record was measured directly at ~44 seconds. Runtime
+scales roughly linearly with inflow record length, so on a ~70-year
+record (like Mandrare) expect roughly 2x that -- an estimate, not a
+direct measurement on every machine/dataset, so treat it as a ballpark:
+  - quick (30x30=900 evals):            a few seconds, most record lengths
+  - full, 30-yr record (75,000 evals):   ~44 seconds (measured)
+  - full, ~70-yr record (75,000 evals):  ~1.5-2 minutes (estimated)
+One-time cost: the FIRST simulate() call on a fresh machine/environment
+pays a one-off numba JIT-compilation cost (~4s uncached, ~0.3s if numba's
+on-disk compilation cache from a previous run is still present) -- this
+happens once per machine, not once per run, and is negligible against
+the runtimes above.
 Evaluations are currently serial (one pymoo worker); pymoo supports
 parallelizing via elementwise_runner (multiprocessing/joblib/MPI) if this
-becomes a bottleneck -- not added by default since it isn't needed yet.
+becomes a bottleneck -- not added by default since it isn't needed given
+the numba speedup already achieved.
 """
 
 from __future__ import annotations
@@ -91,7 +101,7 @@ PRESETS = {
 class ReservoirProblem(ElementwiseProblem):
     """
     pymoo problem wrapping objectives.evaluate(). One row of X = one full
-    111-gene decision vector (hydro design discharge in physical units,
+    110-gene decision vector (hydro design discharge in physical units,
     policy genes in [0, 1] -- pymoo handles the per-variable bounds via
     xl/xu). Irrigation design discharge is fixed (design_discharge_irrig_m3s
     in config_scalars.csv), not a decision variable -- see objectives.py.
