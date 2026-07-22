@@ -20,11 +20,13 @@ EMODPS_Reservoir_Optimization/
 ├── Module/          # project source code
 │   ├── data_loader.py   # reads + validates all Data/ CSVs into one object
 │   ├── policy.py         # zone-based rule curve operating policy
-│   ├── simulator.py      # monthly mass-balance simulation
+│   ├── simulator.py      # monthly mass-balance simulation (numba-jitted core)
 │   ├── objectives.py     # wraps the simulator into MOEA objectives + constraint
 │   ├── optimize.py       # pymoo NSGA-II driver
 │   ├── diagnostics.py    # per-solution failure counts/stats beyond the objectives
-│   └── plot_results.py   # Pareto front, rule curve, level heat map, water balance, climatology, simulation trace figures
+│   ├── plot_results.py   # Pareto front, rule curve, level heat map, water balance, climatology, simulation trace figures
+│   ├── closure.py        # OPTIONAL utility: water-balance closure (self-consistent initial level), not wired into the default pipeline
+│   └── optimize_ctrl_freak.py  # OPTIONAL standalone speed comparison: ctrl-freak's NSGA-II vs pymoo's, on the same problem (requires `uv sync --extra comparison`)
 ├── Output/          # Pareto front results per case, e.g. Output/Mandrare/ (not tracked in git)
 ├── Plot/            # generated figures per case, e.g. Plot/Mandrare/ (not tracked in git)
 ├── pyproject.toml   # project metadata + dependencies (uv-managed)
@@ -75,13 +77,17 @@ uv run python optimize.py --data-dir /path/to/your/Data --preset full
 ```
 Two named presets, or set `--pop-size`/`--n-gen` directly for full manual
 control (explicit flags always override a preset):
-- **`quick`** (pop=30, n_gen=30) -- fast pipeline sanity check (~1 min),
-  confirms everything runs end-to-end against your data. NOT meant for
-  interpreting results.
+- **`quick`** (pop=30, n_gen=30) -- fast pipeline sanity check (a few
+  seconds), confirms everything runs end-to-end against your data. NOT
+  meant for interpreting results.
 - **`full`** (pop=250, n_gen=300) -- recommended default for actual
-  analysis. On a 30-year record this is roughly 16 min; on a longer
-  record (e.g. 70+ years) closer to 40 min, since runtime scales with
-  inflow record length.
+  analysis. `simulate()` is numba-jitted (see `simulator.py`), so this
+  runs in well under a minute on a 30-year record and roughly 1.5-2 min
+  on a longer one (e.g. 70+ years) -- a large speedup (~28x measured)
+  over the pre-numba implementation. The very first `simulate()` call on
+  a fresh machine pays a one-time ~4s JIT-compilation cost (~0.3s if
+  numba's on-disk cache from a previous run is already present); this
+  happens once per machine, not once per run.
 
 **Population size vs. generations control different things.** Generations
 determine how close the search gets to the true efficient frontier
@@ -90,11 +96,25 @@ flattens, more generations won't help. Population size determines how
 many distinct points get retained along that frontier (resolution) -- a
 converged front with a small population can still have visible gaps
 between points, which needs a bigger population, not more generations, to
-fill in. If you suspect a specific gap might be a real discontinuity in
-the achievable trade-off space (e.g. from a discrete policy switch) rather
-than just under-sampling, a cheaper diagnostic than scaling up the whole
-search is a separate run with the relevant decision variable's bounds
-narrowed to bracket just that region.
+fill in.
+
+**Testing whether a gap is a real discontinuity or just under-sampling:**
+if part of the front looks suspiciously empty (e.g. a stretch of
+hydropower capacity with no solutions at all), a cheaper diagnostic than
+scaling up the whole search is a separate, narrow-bounds run using
+`--hydro-min`/`--hydro-max` to override `config_scalars.csv`'s
+`design_discharge_hydro_min`/`_max` for that run only, without editing
+the CSV:
+```bash
+uv run python optimize.py --data-dir /path/to/your/Data --hydro-min 11 --hydro-max 14.5 \
+    --pop-size 400 --n-gen 250 --output-dir /path/to/your/Output/<case_name>_gaptest
+```
+Always give this a **different `--output-dir`** than your main run, so it
+doesn't overwrite your full-range results. If a search with its *entire*
+budget confined to that narrow band still can't populate it, that's
+strong evidence the gap is a genuine discontinuity in the achievable
+trade-off space (e.g. from a discrete zone/policy switch), not an
+artifact of under-sampling.
 
 Results land in `Output/<case_name>/pareto_X.csv`,
 `Output/<case_name>/pareto_F.csv`, `Output/<case_name>/hypervolume_history.csv`
@@ -103,15 +123,39 @@ which folder you happen to run the script from.
 
 Inspect any solution's detailed failure counts (irrigation shortfall
 months, hydropower online/offline months, spill events, dam-safety
-violations) beyond the single aggregated objective values:
+violations) beyond the single aggregated objective values, with the full
+report printed to the terminal:
 ```bash
-uv run python diagnostics.py --data-dir /path/to/your/Data --solution-index 0
+uv run python diagnostics.py --data-dir /path/to/your/Data
 ```
-Diagnoses the first row of `pareto_X.csv` if it exists (falls back
-to a random decision vector otherwise, for a quick sanity check before
-running a full optimization). To diagnose a specific solution
-programmatically: `diagnose(data, categories, x)` returns a
-`DiagnosticsReport` -- see `diagnostics.py` for the full field list.
+By default (no flags needed) this selects the SAME candidate
+`plot_results.py` would pick with no flags either -- the highest-energy
+solution meeting at least `DEFAULT_MIN_RELIABILITY` (90%) irrigation
+reliability. Saves `Output/<case_name>/diagnostics_solution_N.csv` by
+default (`--no-csv` to skip, `--output-csv` to save elsewhere). Falls
+back to a candidate at mid-range hydro capacity if `pareto_X.csv` doesn't
+exist yet (e.g. before running `optimize.py`), for a quick sanity check.
+To diagnose a specific solution programmatically: `diagnose(data,
+categories, x)` returns a `DiagnosticsReport` -- see `diagnostics.py` for
+the full field list.
+
+**You usually don't need to run `diagnostics.py` separately** --
+`plot_results.py` (below) generates the exact same
+`diagnostics_solution_N.csv` automatically, for whichever solution IT
+selects, every time it runs (`--no-diagnostics` to skip). This means the
+plots and the diagnostics CSV are always guaranteed to describe the same
+candidate, with no flag-matching between two commands required. Run
+`diagnostics.py` on its own only when you specifically want the full
+report printed to the terminal, or want diagnostics for a solution
+without regenerating every plot too.
+
+**For one fully coherent set of outputs on a single candidate** (rule
+curve, water balance, climatology, timeseries PNG + CSV, and the
+diagnostics report/CSV, ALL for the same solution), just two commands:
+```bash
+uv run python optimize.py --data-dir /path/to/your/Data --preset full
+uv run python plot_results.py --data-dir /path/to/your/Data
+```
 
 Generate figures from a saved optimization run:
 ```bash
@@ -126,13 +170,21 @@ By default (no extra flags needed) it ALSO picks a specific solution to
 detail -- the one with the HIGHEST energy among those meeting at least
 `DEFAULT_MIN_RELIABILITY` (90%) irrigation reliability (see the constant
 near the top of `plot_results.py`) -- and generates:
+- **diagnostics report** (`Output/<case_name>/diagnostics_solution_N.csv`
+  -- the same report `diagnostics.py` produces, generated automatically
+  for this exact solution; `--no-diagnostics` to skip)
 - **operating rule curve** (PNG zone diagram + CSV export)
 - **reservoir level heat map** (year x month grid, whole record including warm-up)
 - **average monthly water balance** (stacked bar: hydropower/irrigation/
-  environmental flow/spillage/evaporation, against a net inflow line)
-- **monthly climatology** (level, releases, irrigation demand vs. delivered, energy)
+  water supply/environmental flow (bypass only)/spillage/evaporation,
+  against a net inflow line)
+- **monthly climatology** (level, releases, irrigation AND water supply
+  demand vs. delivered, energy)
 - **windowed raw simulation trace** (level vs. MOL/FSL/flood_control_level,
-  all release streams, inflow, irrigation shortfall)
+  all release streams including water supply, inflow, irrigation shortfall)
+  **+ a matching CSV export** (`Output/<case_name>/solution_N_timeseries.csv`,
+  not `Plot/` -- every field shown in the chart, one row per month, same
+  window/`--years`/`--start-offset-years` as the plot)
 
 Three ways to change which solution gets detailed:
 ```bash
